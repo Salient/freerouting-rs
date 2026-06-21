@@ -12,9 +12,13 @@
 //! SES/RTE writers build on these next.
 
 pub mod lexer;
+pub mod reader;
 pub mod sexp;
+pub mod writer;
 
+pub use reader::read_board;
 pub use sexp::Sexp;
+pub use writer::{write_rte, write_ses};
 
 #[cfg(test)]
 mod tests {

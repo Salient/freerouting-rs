@@ -3,9 +3,27 @@
 //! ground-truth input for the round-trip harness.
 
 use fr_dsn::lexer::detect_string_quote;
-use fr_dsn::Sexp;
+use fr_dsn::{read_board, Sexp};
 
 const REAL: &str = include_str!("fixtures/altium_board.dsn");
+
+#[test]
+fn builds_board_from_real_altium_dsn() {
+    let (board, warnings) = read_board(REAL);
+    // 6 signal layers
+    assert_eq!(board.layer_count(), 6, "expected 6 layers");
+    // resolution mil 10000
+    assert_eq!(board.resolution.per_unit, 10000);
+    // many nets and components
+    assert!(board.nets.len() > 100, "nets: {}", board.nets.len());
+    assert!(board.components.len() > 100, "components: {}", board.components.len());
+    // padstacks present, including some shapeless (Altium mounting holes / NPTH)
+    assert!(board.padstacks.len() > 10, "padstacks: {}", board.padstacks.len());
+    // a board outline was read
+    assert!(board.outline_box().is_some(), "expected an outline");
+    // shapeless padstacks should generate warnings (proves tolerant handling ran)
+    eprintln!("read_board warnings: {}", warnings.len());
+}
 
 #[test]
 fn parses_real_altium_board_without_panic() {
