@@ -11,9 +11,11 @@
 //! build on these next.
 
 mod box2d;
+mod convex;
 mod point;
 
 pub use box2d::IntBox;
+pub use convex::ConvexTile;
 pub use point::{signed_area2, FloatPoint, Point, Side, Vector};
 
 /// A board coordinate in integer board units.
