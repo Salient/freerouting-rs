@@ -1,0 +1,3 @@
+# Altium DelphiScript files must stay CRLF (the script loader requires it)
+*.pas text eol=crlf
+*.rte text eol=crlf
