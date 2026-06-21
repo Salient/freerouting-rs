@@ -1,0 +1,16 @@
+[package]
+name = "fr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "freerouting-rs"
+path = "src/main.rs"
+
+[dependencies]
+fr-board.workspace = true
+fr-dsn.workspace = true
+fr-engine.workspace = true
+clap.workspace = true
+anyhow.workspace = true

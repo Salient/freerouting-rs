@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fr-geometry",
+    "crates/fr-spatial",
+    "crates/fr-board",
+    "crates/fr-dsn",
+    "crates/fr-route",
+    "crates/fr-engine",
+    "crates/fr-cli",
+    # fr-gui is built explicitly (needs system GUI libs); see crates/fr-gui.
+]
+exclude = ["crates/fr-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = ""
+
+[workspace.dependencies]
+# shared internal crates
+fr-geometry = { path = "crates/fr-geometry" }
+fr-spatial  = { path = "crates/fr-spatial" }
+fr-board    = { path = "crates/fr-board" }
+fr-dsn      = { path = "crates/fr-dsn" }
+fr-route    = { path = "crates/fr-route" }
+fr-engine   = { path = "crates/fr-engine" }
+
+# third-party
+rstar    = "0.12"
+rayon    = "1"
+bumpalo  = "3"
+clap     = { version = "4", features = ["derive"] }
+anyhow   = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"

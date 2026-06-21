@@ -1,0 +1,10 @@
+[package]
+name = "fr-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fr-board.workspace = true
+fr-route.workspace = true
+rayon.workspace = true

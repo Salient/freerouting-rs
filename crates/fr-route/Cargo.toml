@@ -1,0 +1,11 @@
+[package]
+name = "fr-route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fr-geometry.workspace = true
+fr-spatial.workspace = true
+fr-board.workspace = true
+bumpalo.workspace = true
