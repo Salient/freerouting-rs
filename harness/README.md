@@ -26,7 +26,18 @@ Goal: a fast loop to validate freerouting-rs against real Altium —
 - Work dir on the Windows side: `C:\Users\jheller2\altium_rte_test\`
   (WSL path `/mnt/c/Users/jheller2/altium_rte_test/`).
 
-## Triggering (current, semi-automated)
+## Triggering — CONFIRMED WORKING
+
+`File > Run Script` -> select the procedure in the dialog (NOT F9 on the editor tab).
+`ExportDsn` verified: runs `PCB:Export` with ObjectKind='Specctra Design',
+FileName=<work>\board.dsn, and produces a valid 1.4MB DSN from the open board. A few
+Altium export-option dialogs appear on the way (can be templated/suppressed later).
+
+`ScriptingSystem:RunScriptFile` (FileName=...|ProcName=...) can bind a procedure to a
+toolbar/menu button for one-click triggering. Command-line injection into a RUNNING
+Altium does not work (cold-start only).
+
+## Triggering (legacy notes)
 
 1. In Altium, open the test board.
 2. Run `ExportDsn` (writes `<board>.dsn` to the work dir).
