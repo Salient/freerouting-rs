@@ -222,8 +222,8 @@ mod tests {
             Point::new(0, 0), Point::new(5_000_000, 0),
             Point::new(5_000_000, 5_000_000), Point::new(0, 5_000_000),
         ];
-        b.components.push(Component { name: "U1".into(), location: Point::new(1_000_000, 2_500_000), front: true, rotation: 0.0 });
-        b.components.push(Component { name: "U2".into(), location: Point::new(4_000_000, 2_500_000), front: true, rotation: 0.0 });
+        b.components.push(Component { name: "U1".into(), image: "IMG".into(), location: Point::new(1_000_000, 2_500_000), front: true, rotation: 0.0 });
+        b.components.push(Component { name: "U2".into(), image: "IMG".into(), location: Point::new(4_000_000, 2_500_000), front: true, rotation: 0.0 });
         b.nets.add(Net { name: "N1".into(), pins: vec!["U1-1".into(), "U2-1".into()] });
         b
     }

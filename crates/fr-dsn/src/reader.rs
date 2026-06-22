@@ -6,7 +6,8 @@
 //! reader never panics on real Altium output.
 
 use fr_board::{
-    Board, Component, Direction, Layer, LayerStack, Net, PadShape, Padstack, Resolution, Rules, Unit,
+    Board, Component, Direction, Layer, LayerStack, Net, PadShape, Padstack, Pin, Resolution, Rules,
+    Unit,
 };
 use fr_geometry::Point;
 
@@ -30,9 +31,12 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
     }
     let layer_count = board.layers.count().max(1);
 
+    // Parse library images (footprints + pin offsets) so we can place pins exactly.
+    let mut images: std::collections::HashMap<String, Vec<ImagePin>> = std::collections::HashMap::new();
     if let Some(library) = pcb.child("library") {
         let layers = board.layers.clone();
         read_padstacks(library, &layers, resolution, &mut board.padstacks, &mut warnings);
+        images = read_images(library, resolution);
     }
 
     if let Some(placement) = pcb.child("placement") {
@@ -43,8 +47,102 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
         read_nets(network, &mut board);
     }
 
+    // Build real pins: for each placed component, transform its image's pin offsets by
+    // the component placement (location + rotation + front/back mirror). This replaces
+    // the old "all pins at component center" approximation and is what lets the router
+    // see distinct, correctly-located endpoints.
+    build_pins(&mut board, &images, &mut warnings);
+
     let _ = layer_count;
     (board, warnings)
+}
+
+/// A pin within a library image: padstack name, pin name, offset from the image origin.
+struct ImagePin {
+    padstack: String,
+    name: String,
+    offset: Point,
+}
+
+fn read_images(library: &Sexp, res: Resolution) -> std::collections::HashMap<String, Vec<ImagePin>> {
+    let mut map = std::collections::HashMap::new();
+    for image in library.children("image") {
+        let img_name = image.atom_args().first().copied().unwrap_or("").to_string();
+        let mut pins = Vec::new();
+        for pin in image.children("pin") {
+            // (pin <padstack> <pinname> dx dy [(rotate r)])
+            let a = pin.atom_args();
+            if a.len() >= 4 {
+                let padstack = a[0].to_string();
+                let name = a[1].to_string();
+                let dx = parse_num(a[2]).unwrap_or(0.0);
+                let dy = parse_num(a[3]).unwrap_or(0.0);
+                pins.push(ImagePin { padstack, name, offset: scale_pt(dx, dy, res) });
+            }
+        }
+        map.insert(img_name, pins);
+    }
+    map
+}
+
+/// Rotate a point (about origin) by `deg` degrees CCW, then mirror X for back side.
+fn transform_offset(off: Point, deg: f64, front: bool) -> Point {
+    let r = deg.to_radians();
+    let (s, c) = r.sin_cos();
+    let (ox, oy) = (off.x as f64, off.y as f64);
+    let mut x = ox * c - oy * s;
+    let y = ox * s + oy * c;
+    if !front {
+        x = -x; // back-side components are mirrored about the Y axis
+    }
+    Point::new(x.round() as i64, y.round() as i64)
+}
+
+fn build_pins(
+    board: &mut Board,
+    images: &std::collections::HashMap<String, Vec<ImagePin>>,
+    warnings: &mut Vec<String>,
+) {
+    // Map "RefDes-PinName" -> net id from the netlist.
+    let mut pin_net: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for net_id in 0..board.nets.len() {
+        for pref in &board.nets.get(net_id).unwrap().pins {
+            pin_net.insert(pref.clone(), net_id);
+        }
+    }
+
+    let mut pins = Vec::new();
+    let mut missing_images = 0usize;
+    // collect component data first (avoid borrow conflict while pushing pins)
+    let comps: Vec<(String, String, Point, bool, f64)> = board
+        .components
+        .iter()
+        .map(|c| (c.name.clone(), c.image.clone(), c.location, c.front, c.rotation))
+        .collect();
+    for (refdes, image, loc, front, rot) in comps {
+        let Some(img_pins) = images.get(&image) else {
+            missing_images += 1;
+            continue;
+        };
+        for ip in img_pins {
+            let t = transform_offset(ip.offset, rot, front);
+            let world = Point::new(loc.x + t.x, loc.y + t.y);
+            let pref = format!("{refdes}-{}", ip.name);
+            let net = pin_net.get(&pref).copied();
+            let padstack = board.padstacks.index_of(&ip.padstack).unwrap_or(usize::MAX);
+            pins.push(Pin {
+                component: refdes.clone(),
+                name: ip.name.clone(),
+                padstack,
+                location: world,
+                net,
+            });
+        }
+    }
+    if missing_images > 0 {
+        warnings.push(format!("{missing_images} components had no matching library image"));
+    }
+    board.pins = pins;
 }
 
 fn read_resolution(pcb: &Sexp, warnings: &mut Vec<String>) -> Resolution {
@@ -197,6 +295,8 @@ fn apply_shape(shapes: &mut [Option<PadShape>], layers: &LayerStack, layer_tok: 
 
 fn read_components(placement: &Sexp, res: Resolution, board: &mut Board) {
     for comp in placement.children("component") {
+        // the component scope head is the library image name
+        let image = comp.atom_args().first().copied().unwrap_or("").to_string();
         for place in comp.children("place") {
             let a = place.atom_args();
             if a.len() >= 3 {
@@ -205,7 +305,13 @@ fn read_components(placement: &Sexp, res: Resolution, board: &mut Board) {
                 let y = parse_num(a[2]).unwrap_or(0.0);
                 let front = a.get(3).map(|s| s.eq_ignore_ascii_case("front")).unwrap_or(true);
                 let rotation = a.get(4).and_then(|s| parse_num(s)).unwrap_or(0.0);
-                board.components.push(Component { name, location: scale_pt(x, y, res), front, rotation });
+                board.components.push(Component {
+                    name,
+                    image: image.clone(),
+                    location: scale_pt(x, y, res),
+                    front,
+                    rotation,
+                });
             }
         }
     }
@@ -276,5 +382,36 @@ mod tests {
         // net
         assert_eq!(b.nets.len(), 1);
         assert_eq!(b.nets.get(0).unwrap().pins, vec!["R1-1", "R1-2"]);
+    }
+
+    #[test]
+    fn transform_offset_rotation_and_mirror() {
+        // 90 deg CCW maps (+x,0) -> (0,+x)
+        let p = transform_offset(Point::new(100, 0), 90.0, true);
+        assert!((p.x).abs() < 2 && (p.y - 100).abs() < 2, "got {:?}", p);
+        // back-side mirrors X: (+x,0) at 0 deg -> (-x,0)
+        let m = transform_offset(Point::new(100, 0), 0.0, false);
+        assert_eq!(m, Point::new(-100, 0));
+    }
+
+    #[test]
+    fn builds_pins_at_transformed_locations() {
+        // Two-pin image, component placed at (1000000,1000000) mil-units, rotation 0,
+        // front. Pins at +/-18.2087 mil on x => +/-182087 board units from center.
+        let src = "(pcb demo (resolution mil 10000) \
+            (structure (layer Top (type signal)) (rule (width 10)(clearance 8)) \
+                       (boundary (rect pcb 0 0 1000 1000))) \
+            (library (padstack P (shape (circle signal 20.0))) \
+                     (image RES2 (pin P 1 -18.2087 0.0) (pin P 2 18.2087 0.0))) \
+            (placement (component RES2 (place R1 100.0 100.0 front 0))) \
+            (network (net N (pins R1-1 R1-2))))";
+        let (b, _w) = read_board(src);
+        // two pins built, at the transformed offsets around (1_000_000, 1_000_000)
+        assert_eq!(b.pins.len(), 2);
+        let xs: Vec<i64> = b.pins.iter().map(|p| p.location.x).collect();
+        assert!(xs.contains(&(1_000_000 - 182_087)));
+        assert!(xs.contains(&(1_000_000 + 182_087)));
+        // both pins bound to net 0
+        assert!(b.pins.iter().all(|p| p.net == Some(0)));
     }
 }

@@ -12,9 +12,13 @@ use crate::units::Resolution;
 /// A placed component instance.
 #[derive(Clone, Debug)]
 pub struct Component {
+    /// Reference designator (e.g. "R49").
     pub name: String,
+    /// The library image this component instantiates (its footprint).
+    pub image: String,
     pub location: Point,
     pub front: bool,
+    /// Placement rotation in degrees, counter-clockwise.
     pub rotation: f64,
 }
 
