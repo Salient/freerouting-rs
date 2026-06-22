@@ -103,8 +103,11 @@ pub fn find_path(
         index, start_layer, start, p.net, p.clearance, p.half_width, p.bound,
     )?;
     let mut nodes: Vec<Node> = vec![Node { point: start, layer: start_layer, parent: u32::MAX }];
-    // if the start room already contains the goal, the path is a straight segment.
-    if start_room.contains(goal) {
+    // if the start room already contains the goal and the direct segment is clear, the
+    // path is a single straight segment.
+    if start_room.contains(goal)
+        && index.segment_is_clear(start_layer, start, goal, p.half_width, p.net, p.clearance)
+    {
         return Some(vec![
             PathPoint { point: start, layer: start_layer },
             PathPoint { point: goal, layer: start_layer },
@@ -140,8 +143,10 @@ pub fn find_path(
         let node_id = nodes.len() as u32;
         nodes.push(Node { point: fr.entry, layer: fr.layer, parent: fr.parent });
 
-        if room.contains(goal) {
-            // reached: backtrace points then append goal
+        if room.contains(goal)
+            && index.segment_is_clear(fr.layer, fr.entry, goal, p.half_width, p.net, p.clearance)
+        {
+            // reached: backtrace points then append goal (final hop validated clear)
             let mut path = backtrace(&nodes, node_id);
             path.push(PathPoint { point: goal, layer: fr.layer });
             return Some(path);
@@ -170,32 +175,69 @@ fn enqueue_room_doors(
     let cell = p.dedup_cell.max(1);
     let key = |layer: usize, pt: Point| (layer, pt.x.div_euclid(cell), pt.y.div_euclid(cell));
     for door in room.doors(index, p.net, p.clearance, p.half_width, p.bound, p.step) {
-        let cross = door_crossing(&door, entry, goal);
-        if visited.contains(&key(room.layer, door.out_seed)) {
-            continue;
+        // Like Java's door sectioning: try several crossing points along the door (its two
+        // ends pulled inward, its midpoint, and the point nearest the goal) so the search
+        // can route through whichever part of the door leads onward. Each crossing's next-
+        // room seed is that crossing pushed just across the door, so entry -> cross ->
+        // neighbour-seed stay consistent (the neighbour room is grown where we enter it).
+        for (cross, out_seed) in door_crossings(&door, goal, p.step) {
+            if visited.contains(&key(room.layer, out_seed)) {
+                continue;
+            }
+            // The trace must travel entry -> cross within this room without clipping
+            // copper. Validating here guarantees every parent->child crossing edge is
+            // clear, so the backtrace polyline (and its string-pulled simplification) is
+            // clear by construction. Rooms are regrown per-seed (not a single persistent
+            // tiling), so this exact check keeps the corridor electrically valid.
+            if !index.segment_is_clear(room.layer, entry, cross, p.half_width, p.net, p.clearance)
+            {
+                continue;
+            }
+            let g2 = g + dist(entry, cross);
+            let h = dist(cross, goal);
+            heap.push(Frontier {
+                f: g2 + h,
+                g: g2,
+                entry: cross,
+                seed: out_seed,
+                layer: room.layer,
+                parent,
+            });
         }
-        let g2 = g + dist(entry, cross);
-        let h = dist(cross, goal);
-        heap.push(Frontier {
-            f: g2 + h,
-            g: g2,
-            entry: cross,
-            seed: door.out_seed,
-            layer: room.layer,
-            parent,
-        });
     }
 }
 
-/// Choose the point on the door segment to cross: the point closest to the straight line
-/// from `entry` toward `goal`, clamped to the segment. This biases the path toward the
-/// goal (the any-angle backtrace later straightens it further).
-fn door_crossing(door: &Door, entry: Point, goal: Point) -> Point {
-    // closest point on the door segment to the goal-directed ray from entry: approximate
-    // by the closest segment point to `goal` (pulls the crossing toward the goal).
+/// Candidate crossing points on a door (Java door sectioning): the midpoint, the two ends
+/// pulled slightly inward, and the point nearest the goal. For each, the next-room seed is
+/// that crossing pushed `step` units across the door into the neighbour's free space, so
+/// `entry -> cross -> neighbour-seed` stay consistent (the neighbour room is grown where
+/// we enter it).
+fn door_crossings(door: &Door, goal: Point, step: i64) -> Vec<(Point, Point)> {
     let (a, b) = door.seg;
-    let _ = entry;
-    nearest_on_segment(goal, a, b)
+    let along = |t: f64| {
+        Point::new(
+            (a.x as f64 + (b.x - a.x) as f64 * t).round() as i64,
+            (a.y as f64 + (b.y - a.y) as f64 * t).round() as i64,
+        )
+    };
+    let mut crosses = vec![nearest_on_segment(goal, a, b), along(0.5), along(0.15), along(0.85)];
+    crosses.dedup();
+
+    // outward normal direction is door.out_seed - segment-midpoint (already free-side).
+    let mid = Point::new((a.x + b.x) / 2, (a.y + b.y) / 2);
+    let (nx, ny) = ((door.out_seed.x - mid.x) as f64, (door.out_seed.y - mid.y) as f64);
+    let nlen = (nx * nx + ny * ny).sqrt().max(1e-9);
+    let s = step.max(1) as f64;
+    crosses
+        .into_iter()
+        .map(|cross| {
+            let seed = Point::new(
+                cross.x + (nx / nlen * s).round() as i64,
+                cross.y + (ny / nlen * s).round() as i64,
+            );
+            (cross, seed)
+        })
+        .collect()
 }
 
 fn nearest_on_segment(p: Point, a: Point, b: Point) -> Point {
