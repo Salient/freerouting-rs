@@ -60,39 +60,46 @@ Note: Phase 2 (fr-spatial / rstar R-tree) is stubbed; the grid router doesn't ne
 yet. The free-angle room/door model (the spec's end-goal search space) is NOT yet built
 — the current router uses a uniform grid as a working stand-in (same A* driver).
 
-## Verified end-to-end
+## Verified end-to-end (current)
 
-`freerouting-rs route harness/sample_board.dsn -o out.rte --max-time 30` loads the real
-43k-line Altium board (6 layers, 417 nets, 802 components), routes (~12 nets / 112 traces
-in ~12s), and emits a valid Altium-format RTE (CRLF, top-level routes, one-line wires with
-per-wire net/type, balanced parens). `info` subcommand prints a board summary.
+`freerouting-rs route harness/sample_board.dsn -o out.rte` loads the real 43k-line
+Altium board (6 layers, 417 nets, 802 components), routes **374/417 nets, 934 traces,
+49 vias in ~3.5s** (incremental + MST + local-first order + multi-pass), and emits a
+valid Altium-format RTE (CRLF, top-level routes, one-line wires w/ per-wire net/type,
+scaled-int coords, all inside the outline). The egui GUI runs on WSLg `:0` (wgpu
+backend) with file browser, config panel, ratsnest, net highlight, layer legend,
+Route/Clear/Fit/Export.
 
-## Open items / debug-later (in priority order)
+## THE open problem (start here on resume)
 
-1. **Routing completion is low (~12/417 nets).** Root causes to fix:
-   - Pins are placed at COMPONENT CENTERS (no per-pin image/offset parsing yet), so
-     multi-pin nets on one component have coincident points and inter-pin geometry is
-     wrong. Implement real pin placement from library `(image (pin ...))` + component
-     rotation/placement. THIS is the biggest quality lever.
-   - Net connection ordering is a naive chain; use an MST over pins.
-   - Grid pitch/expansion tuning; consider the real room/door model for free-angle.
-2. **Phase 7 GUI headless launch** fails: winit "Broken pipe" -> ExitFailure(1) under
-   Xvfb (+ -ac, + openbox all tried). Env issue, not code. Verify on real WSLg `:0`
-   (DISPLAY=:0) — was about to test when we paused. harness/gui_screenshot.sh is the gate.
-3. **Phase 8** parallel scheduler + criterion benches not started.
-4. fr-spatial R-tree unused; wire in when moving off the grid.
-5. Polygon-pour pads approximated as circles in the DSN reader (TODO in reader.rs).
-6. The Java oracle's conduction-area (pour) wires may still be multi-line — separate
-   from fr-rs; noted in the Java repo.
+**Trace-to-PAD shorts (~14 on the real board).** Verified by the true copper-geometry
+DRC (fr-engine: `drc_short_count` = trace-trace = 0; `drc_trace_pin_short_count` ~14).
+Cause: component pads (13-16 mil radius) are LARGER than the routing-grid pitch, so a
+trace routed to the cell next to a pad still overlaps its copper. Finer grids trade
+this for worse completion (tested). This is a fundamental grid-routing limit.
+
+**=> Implement the free-angle room/door search model (task #9).** It represents exact
+pad/trace geometry with true clearance and structurally eliminates trace-to-pad shorts
+(this is why real freerouting uses it, not a grid). It also lifts completion past ~76%
+and yields any-angle/shorter traces. This is the required next step for usable output.
+The A* driver (fr-route/astar.rs) and engine API are structured so only the neighbour
+generation / search space changes; keep the DRC gates (tests/drc.rs, tests/offboard.rs)
+green and tighten trace-pin to 0 once done.
+
+## Smaller open items
+- fr-spatial (rstar) R-tree is still unused; wire it in for the room/door obstacle queries.
+- Polygon-pour pads approximated as circles in the DSN reader (reader.rs TODO).
+- GUI: live redraw DURING routing (currently routes synchronously then redraws); a
+  background routing thread + progress channel would let the canvas animate.
+- Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
 
 ## Next steps (recommended order on resume)
 
-1. **Test GUI on DISPLAY=:0** (real WSLg) to confirm it renders, capture a screenshot.
-   If it works there, the Phase 7 gate is met (headless was an env artifact).
-2. **Implement real pin placement** (library images + component transform) — unlocks
-   routing completion, the main quality gap.
-3. Phase 8: rayon multi-net scheduler + benches.
-4. Phase 9 acceptance pass; produce artifacts/baseline_rs.rte for Altium import.
+1. **Build the free-angle room/door router (task #9)** — the required fix for
+   trace-to-pad shorts and higher completion. Biggest, highest-value work item.
+2. Wire fr-spatial R-tree into obstacle queries as part of #9.
+3. Re-run DRC gates; tighten trace-pin shorts gate toward 0.
+4. GUI live-routing thread + progress.
 
 ## Key commands
 
