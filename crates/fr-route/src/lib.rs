@@ -12,5 +12,5 @@ pub mod router;
 
 pub use astar::Costs;
 pub use grid::{Grid, Node};
-pub use obstacles::ObstacleMap;
+pub use obstacles::{via_radius, ObstacleMap};
 pub use router::{route_connection, RoutedConnection};

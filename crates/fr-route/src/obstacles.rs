@@ -17,17 +17,25 @@ pub struct ObstacleMap<'a> {
     /// owner net id per cell, if the cell is occupied by a specific net (so same-net
     /// cells are passable). usize::MAX = no specific owner / multi.
     owner: Vec<Vec<u32>>,
+    /// Design clearance in board units, added to every stamped radius so that two
+    /// different-net traces cannot be placed in abutting cells (which would short).
+    clearance: i64,
 }
 
 const NO_OWNER: u32 = u32::MAX;
 
 impl<'a> ObstacleMap<'a> {
     pub fn build(board: &Board, grid: &'a Grid) -> ObstacleMap<'a> {
+        Self::build_with_clearance(board, grid, board.rules.default_clearance)
+    }
+
+    pub fn build_with_clearance(board: &Board, grid: &'a Grid, clearance: i64) -> ObstacleMap<'a> {
         let per_layer = (grid.cols * grid.rows) as usize;
         let mut map = ObstacleMap {
             grid,
             blocked: vec![vec![false; per_layer]; grid.layers],
             owner: vec![vec![NO_OWNER; per_layer]; grid.layers],
+            clearance: clearance.max(0),
         };
 
         // Stamp pin footprints. A pin blocks the cells around its location on the layers
@@ -57,27 +65,39 @@ impl<'a> ObstacleMap<'a> {
         // Existing traces/vias on the board also block (tagged by their net).
         for t in &board.traces {
             let net = t.net.map(|n| n as u32).unwrap_or(NO_OWNER);
-            let half = t.width / 2;
-            for w in t.corners.windows(2) {
-                map.stamp_segment(t.layer.min(grid.layers - 1), w[0], w[1], half, net);
-            }
+            map.stamp_trace(t.layer, &t.corners, t.width, net);
         }
         for v in &board.vias {
             let net = v.net.map(|n| n as u32).unwrap_or(NO_OWNER);
-            let r = board
-                .padstacks
-                .get(v.padstack)
-                .and_then(|p| p.shapes.iter().filter_map(|s| match s {
-                    Some(fr_board::PadShape::Circle { radius }) => Some(*radius),
-                    _ => None,
-                }).max())
-                .unwrap_or(grid.pitch);
-            for layer in 0..grid.layers {
-                map.stamp_disc(layer, v.location, r, net);
-            }
+            let r = via_radius(board, v.padstack, grid.pitch);
+            map.stamp_via(v.location, r, net);
         }
 
         map
+    }
+
+    /// Stamp a routed trace (full rasterized path, width + clearance) tagged with `net`.
+    /// Used to add a net's geometry to the map incrementally as routing progresses, so
+    /// the next net's search sees it and cannot overlap it (the fix for shorting).
+    pub fn stamp_trace(&mut self, layer: usize, corners: &[Point], width: i64, net: u32) {
+        // Block this trace's half-width PLUS another half-width: the A* routes a new
+        // trace along node centerlines, so to keep that new (same-width) trace's EDGE at
+        // least `clearance` away from THIS trace's edge, the blocked footprint must
+        // reserve both half-widths (stamp_disc adds the clearance on top). Without the
+        // extra half-width, two centerlines could sit exactly `clearance` apart and their
+        // copper would touch.
+        let reserve = width; // = half (this) + half (future trace)
+        let layer = layer.min(self.grid.layers - 1);
+        for w in corners.windows(2) {
+            self.stamp_segment(layer, w[0], w[1], reserve, net);
+        }
+    }
+
+    /// Stamp a via (a disc on every layer) tagged with `net`.
+    pub fn stamp_via(&mut self, center: Point, radius: i64, net: u32) {
+        for layer in 0..self.grid.layers {
+            self.stamp_disc(layer, center, radius, net);
+        }
     }
 
     fn idx(&self, n: Node) -> usize {
@@ -88,7 +108,10 @@ impl<'a> ObstacleMap<'a> {
         if layer >= self.grid.layers {
             return;
         }
-        let r_cells = (radius / self.grid.pitch).max(0) + 1;
+        // Add the design clearance so a different-net trace must keep its distance; the
+        // +1 rounds the footprint out to whole cells. This is what prevents adjacent
+        // parallel traces of different nets from touching (shorting).
+        let r_cells = ((radius + self.clearance) / self.grid.pitch).max(0) + 1;
         let c = self.grid.node_at(layer, center);
         for dc in -r_cells..=r_cells {
             for dr in -r_cells..=r_cells {
@@ -108,8 +131,10 @@ impl<'a> ObstacleMap<'a> {
     }
 
     fn stamp_segment(&mut self, layer: usize, a: Point, b: Point, half: i64, net: u32) {
-        // sample along the segment at pitch intervals, stamping a disc at each
-        let steps = (a.to_float().distance(b.to_float()) / self.grid.pitch as f64).ceil() as i64 + 1;
+        // Sample along the segment at HALF-pitch intervals so a diagonal segment cannot
+        // skip a grid cell between samples (which would leave a gap another net could
+        // route through, causing a touch/short).
+        let steps = (2.0 * a.to_float().distance(b.to_float()) / self.grid.pitch as f64).ceil() as i64 + 1;
         for s in 0..=steps {
             let t = s as f64 / steps as f64;
             let p = Point::new(
@@ -134,6 +159,24 @@ impl<'a> ObstacleMap<'a> {
     }
 }
 
+/// The footprint radius of a via's padstack (max circle radius across layers), or the
+/// grid pitch as a fallback.
+pub fn via_radius(board: &Board, padstack: usize, fallback: i64) -> i64 {
+    board
+        .padstacks
+        .get(padstack)
+        .and_then(|p| {
+            p.shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Some(fr_board::PadShape::Circle { radius }) => Some(*radius),
+                    _ => None,
+                })
+                .max()
+        })
+        .unwrap_or(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +199,29 @@ mod tests {
         let at_pin = grid.node_at(0, Point::new(500_000, 500_000));
         assert!(map.passable(at_pin, 0), "own net 0 may enter its pin");
         assert!(!map.passable(at_pin, 1), "other net 1 is blocked by the pin");
+    }
+
+    #[test]
+    fn stamped_trace_blocks_other_nets_with_clearance() {
+        let mut board = Board::new("t".into(), Resolution::new(Unit::Mil, 10000));
+        board.layers = fr_board::LayerStack::new(vec![fr_board::Layer {
+            name: "Top".into(), index: 0, is_signal: true, preferred: None,
+        }]);
+        let grid = Grid::new(IntBox::new(0, 0, 2_000_000, 2_000_000), 20_000, 1);
+        let mut map = ObstacleMap::build_with_clearance(&board, &grid, 80_000);
+        // a horizontal net-0 trace across the middle
+        let corners = [Point::new(200_000, 1_000_000), Point::new(1_800_000, 1_000_000)];
+        map.stamp_trace(0, &corners, 100_000, 0);
+
+        // a cell right on the trace is blocked for net 1 but passable for net 0
+        let on = grid.node_at(0, Point::new(1_000_000, 1_000_000));
+        assert!(map.passable(on, 0), "own net may follow its own trace");
+        assert!(!map.passable(on, 1), "other net is blocked on the trace");
+        // a cell within (half-width + clearance) is also blocked for net 1 (no touch)
+        let near = grid.node_at(0, Point::new(1_000_000, 1_060_000));
+        assert!(!map.passable(near, 1), "other net is blocked within clearance of the trace");
+        // far away is free
+        let far = grid.node_at(0, Point::new(1_000_000, 1_500_000));
+        assert!(map.passable(far, 1), "other net is free far from the trace");
     }
 }
