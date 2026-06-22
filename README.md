@@ -8,10 +8,10 @@ into Altium Designer.
 ## Build & test
 
 ```bash
-cargo build --release          # CLI -> target/release/freerouting-rs
+cargo build --release          # core CLI -> target/release/freerouting-rs
 cargo test                     # all crates (fr-gui builds separately)
 cargo bench -p fr-engine       # parallel vs sequential routing benchmark
-(cd crates/fr-gui && cargo build --release)   # GUI (needs system X11/GL libs)
+(cd crates/fr-gui && cargo build --release)   # main app (needs system X11/GL libs)
 ```
 
 Requires a stable Rust toolchain. The GUI additionally needs X11/GL dev libraries
@@ -19,22 +19,29 @@ Requires a stable Rust toolchain. The GUI additionally needs X11/GL dev librarie
 
 ## Usage
 
+The main binary is `freerouting-rs-gui`: it launches the **interactive GUI by default**,
+or batch-routes with `--headless` (no window/display needed).
+
 ```bash
-# summarize a board
-freerouting-rs info BOARD.dsn
-
-# route and write an Altium-importable route file (extension picks RTE/SES)
-freerouting-rs route BOARD.dsn -o OUT.rte [--max-time SECS] [--threads N] [--seed S]
-
-# headless render of the routed board to a PPM image (no window needed)
-freerouting-rs-gui --render BOARD.dsn OUT.ppm [W H]
-
-# interactive GUI (real display): open, pan/zoom, route, export
+# interactive GUI (default); optionally open a board on launch
 freerouting-rs-gui [BOARD.dsn]
+# under WSLg, force software GL so the window appears:
+LIBGL_ALWAYS_SOFTWARE=1 freerouting-rs-gui BOARD.dsn
+
+# headless batch route -> Altium-importable RTE/SES (extension picks the format;
+# -o defaults to BOARD.rte next to the input)
+freerouting-rs-gui --headless BOARD.dsn [-o OUT.rte] [--max-time SECS] [--threads N] [--seed S]
+
+# headless render of the routed board to a PPM image (CI / no display)
+freerouting-rs-gui --render OUT.ppm BOARD.dsn [--width W --height H]
 ```
 
 `--threads 0` (default) uses the parallel scheduler; `--threads 1` forces sequential.
 Output is deterministic for a given input + seed + thread count.
+
+The core workspace also builds a smaller headless-only binary, `freerouting-rs`
+(`fr-cli`), with `info` / `route` subcommands — useful when GUI system libs aren't
+available (it excludes the GUI dependencies).
 
 ## Workspace
 
@@ -46,8 +53,8 @@ Output is deterministic for a given input + seed + thread count.
 | `fr-dsn`      | tolerant Specctra DSN reader + SES/RTE writers |
 | `fr-route`    | grid weighted-A* router (obstacles, search, path→geometry) |
 | `fr-engine`   | orchestration: pin placement, MST ordering, parallel scheduler |
-| `fr-cli`      | `freerouting-rs` headless binary |
-| `fr-gui`      | egui board viewer + autorouter front-end (built standalone) |
+| `fr-cli`      | `freerouting-rs` headless-only binary (`info`/`route`; no GUI deps) |
+| `fr-gui`      | `freerouting-rs-gui` — main app: GUI by default, `--headless`/`--render` for batch (built standalone) |
 
 ## Status & docs
 
