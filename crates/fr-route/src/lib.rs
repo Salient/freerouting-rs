@@ -1,9 +1,16 @@
-//! fr-route: the autorouter - expansion rooms/doors (index-arena), weighted-A* maze
-//! search, shove, rip-up, backtrack + geometry realization, post-optimization.
-//! Phases 5-6.
+//! fr-route: the autorouter search space and single-net router.
+//!
+//! Phase 5 provides a working router on a uniform grid (deterministic weighted A* with
+//! via moves, obstacle clearance, path -> trace/via geometry). The spec's free-angle
+//! expansion-room/door model replaces the grid's neighbour generation in a later phase
+//! without changing the engine API. Phase 6 adds shove/rip-up and optimization.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds() { assert_eq!(2 + 2, 4); }
-}
+pub mod astar;
+pub mod grid;
+pub mod obstacles;
+pub mod router;
+
+pub use astar::Costs;
+pub use grid::{Grid, Node};
+pub use obstacles::ObstacleMap;
+pub use router::{route_connection, RoutedConnection};

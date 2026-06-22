@@ -236,6 +236,8 @@ name = "fr-engine"
 version = "0.1.0"
 dependencies = [
  "fr-board",
+ "fr-dsn",
+ "fr-geometry",
  "fr-route",
  "rayon",
 ]

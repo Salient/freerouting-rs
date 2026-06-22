@@ -6,5 +6,9 @@ license.workspace = true
 
 [dependencies]
 fr-board.workspace = true
+fr-geometry.workspace = true
 fr-route.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+fr-dsn.workspace = true
