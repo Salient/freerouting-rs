@@ -288,15 +288,29 @@ fn choose_pitch(board: &Board, bounds: fr_geometry::IntBox) -> i64 {
 }
 
 fn ensure_via_padstack(board: &mut Board) -> usize {
-    // Reuse an existing through via padstack if present, else add one.
+    let layer_count = board.layer_count().max(1);
+    let spans_all = |p: &Padstack| {
+        !p.is_empty() && p.from_layer() == Some(0) && p.to_layer() == Some(layer_count - 1)
+    };
+    // Prefer a real routing-via padstack: one whose NAME contains "via" and that spans
+    // the full stack. Using an arbitrary layer-0 pad (e.g. a through-hole component pad)
+    // as the via produces wrong-looking vias on import in Altium.
+    if let Some(i) = (0..board.padstacks.len()).find(|&i| {
+        board.padstacks.get(i).map(|p| {
+            p.name.to_ascii_lowercase().contains("via") && spans_all(p)
+        }).unwrap_or(false)
+    }) {
+        return i;
+    }
+    // Next best: any padstack that spans the full layer stack.
     if let Some(i) = (0..board.padstacks.len())
-        .find(|&i| board.padstacks.get(i).map(|p| !p.is_empty() && p.from_layer() == Some(0)).unwrap_or(false))
+        .find(|&i| board.padstacks.get(i).map(spans_all).unwrap_or(false))
     {
         return i;
     }
-    let layer_count = board.layer_count().max(1);
+    // Fallback: synthesize a through via.
     board.padstacks.add(Padstack {
-        name: "__via".into(),
+        name: "Via_fr_rs".into(),
         shapes: (0..layer_count).map(|_| Some(PadShape::Circle { radius: 120_000 })).collect(),
         drillable: true,
     })
@@ -329,6 +343,29 @@ mod tests {
         b.components.push(Component { name: "U2".into(), image: "IMG".into(), location: Point::new(4_000_000, 2_500_000), front: true, rotation: 0.0 });
         b.nets.add(Net { name: "N1".into(), pins: vec!["U1-1".into(), "U2-1".into()] });
         b
+    }
+
+    #[test]
+    fn prefers_named_via_padstack() {
+        use fr_board::{PadShape, Padstack};
+        let mut b = two_pin_board();
+        // a real routing-via padstack spanning both layers, plus a decoy through-pad
+        b.padstacks.add(Padstack {
+            name: "MyRoutingVia".into(),
+            shapes: vec![Some(PadShape::Circle { radius: 110_000 }), Some(PadShape::Circle { radius: 110_000 })],
+            drillable: true,
+        });
+        let idx = ensure_via_padstack(&mut b);
+        assert_eq!(b.padstacks.get(idx).unwrap().name, "MyRoutingVia",
+            "should pick the padstack named like a via");
+    }
+
+    #[test]
+    fn synthesizes_via_when_none_present() {
+        let mut b = two_pin_board(); // no full-span padstacks
+        let idx = ensure_via_padstack(&mut b);
+        let ps = b.padstacks.get(idx).unwrap();
+        assert!(!ps.is_empty() && ps.from_layer() == Some(0));
     }
 
     #[test]
