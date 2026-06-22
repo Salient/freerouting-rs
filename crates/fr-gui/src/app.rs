@@ -275,22 +275,29 @@ impl App {
             if resp.clicked() && !self.route_mode { Some(hover_pick) } else { None };
 
         // board outline: filled substrate (concave-safe via ear-clipping) + edge stroke,
-        // giving clear board/background contrast.
+        // giving clear board/background contrast. The fill is built as an explicit Mesh
+        // (winding-independent) rather than convex_polygon, because to_screen flips Y and
+        // egui's convex-polygon fill is winding-sensitive (it can drop reversed triangles
+        // on some backends). The Mesh rasterizes regardless of vertex order.
         if board.outline.len() >= 3 {
-            let board_fill = Color32::from_rgb(20, 56, 44); // dark PCB green-teal
+            let board_fill = Color32::from_rgb(22, 64, 50); // dark PCB green-teal
+            let mut mesh = egui::epaint::Mesh::default();
             for tri in crate::padgeom::triangulate(&board.outline) {
-                let p = [
-                    view.to_screen(board.outline[tri[0]], screen),
-                    view.to_screen(board.outline[tri[1]], screen),
-                    view.to_screen(board.outline[tri[2]], screen),
-                ];
-                painter.add(egui::Shape::convex_polygon(p.to_vec(), board_fill, Stroke::NONE));
+                let base = mesh.vertices.len() as u32;
+                for &vi in &tri {
+                    mesh.colored_vertex(view.to_screen(board.outline[vi], screen), board_fill);
+                }
+                mesh.add_triangle(base, base + 1, base + 2);
             }
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
+            }
+            // bright, bold edge so the board boundary is unmistakable.
             let edge: Vec<Pos2> = board.outline.iter().map(|&p| view.to_screen(p, screen)).collect();
             for i in 0..edge.len() {
                 painter.line_segment(
                     [edge[i], edge[(i + 1) % edge.len()]],
-                    Stroke::new(1.8, Color32::from_rgb(120, 200, 170)),
+                    Stroke::new(2.5, Color32::from_rgb(150, 230, 200)),
                 );
             }
         }
@@ -312,8 +319,19 @@ impl App {
                         painter.circle_filled(c, r, col);
                     }
                     crate::padgeom::PadDraw::Poly(verts) => {
+                        // Mesh fill (winding-independent under the Y-flip), fan-triangulated
+                        // since pad polygons are convex.
                         let pts: Vec<Pos2> = verts.iter().map(|&p| view.to_screen(p, screen)).collect();
-                        painter.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
+                        if pts.len() >= 3 {
+                            let mut mesh = egui::epaint::Mesh::default();
+                            for &p in &pts {
+                                mesh.colored_vertex(p, col);
+                            }
+                            for i in 1..(pts.len() as u32 - 1) {
+                                mesh.add_triangle(0, i, i + 1);
+                            }
+                            painter.add(egui::Shape::mesh(mesh));
+                        }
                     }
                 }
             }

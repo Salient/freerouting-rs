@@ -9,7 +9,7 @@ use fr_board::{
     Board, Component, Direction, Layer, LayerStack, Net, PadShape, Padstack, Pin, Resolution, Rules,
     Unit,
 };
-use fr_geometry::Point;
+use fr_geometry::{ConvexTile, Point};
 
 use crate::lexer::detect_string_quote;
 use crate::sexp::Sexp;
@@ -258,16 +258,44 @@ fn read_padstacks(
             } else if let Some(rect) = shape.child("rect") {
                 let a = rect.atom_args();
                 let layer_tok = a.first().copied().unwrap_or("signal");
-                // Represent rect pads as a circle of equivalent half-extent for now
-                // (the router only needs an approximate keepout footprint at the pin).
+                // (rect <layer> x1 y1 x2 y2): the true rectangular copper, relative to the
+                // pad origin, as a CCW convex tile. Preserves real pad shape for the DRC,
+                // the room/door obstacle model, and the GUI (no longer circle-approximated).
                 let nums: Vec<f64> = a.iter().skip(1).filter_map(|s| parse_num(s)).collect();
                 if nums.len() >= 4 {
-                    let hw = ((nums[2] - nums[0]).abs() / 2.0).max((nums[3] - nums[1]).abs() / 2.0);
-                    let radius = scale(hw, res).max(1);
-                    apply_shape(&mut shapes, layers, layer_tok, PadShape::Circle { radius });
+                    let (x1, y1) = (scale(nums[0], res), scale(nums[1], res));
+                    let (x2, y2) = (scale(nums[2], res), scale(nums[3], res));
+                    let (lo_x, hi_x) = (x1.min(x2), x1.max(x2));
+                    let (lo_y, hi_y) = (y1.min(y2), y1.max(y2));
+                    let tile = ConvexTile::from_ccw(vec![
+                        Point::new(lo_x, lo_y),
+                        Point::new(hi_x, lo_y),
+                        Point::new(hi_x, hi_y),
+                        Point::new(lo_x, hi_y),
+                    ]);
+                    apply_shape(&mut shapes, layers, layer_tok, PadShape::Convex(tile));
+                }
+            } else if let Some(poly) = shape.child("polygon") {
+                // (polygon <layer> <aperture_width> x1 y1 x2 y2 ...): the polygon copper
+                // outline relative to the pad origin. Keep the real shape as a convex tile
+                // (pad polygons are convex); ensure CCW so the model's predicates hold.
+                let a = poly.atom_args();
+                let layer_tok = a.first().copied().unwrap_or("signal");
+                // skip the layer token + aperture width, then read coordinate pairs.
+                let nums: Vec<f64> = a.iter().skip(2).filter_map(|s| parse_num(s)).collect();
+                let mut verts: Vec<Point> = nums
+                    .chunks_exact(2)
+                    .map(|c| scale_pt(c[0], c[1], res))
+                    .collect();
+                // a closing repeat of the first vertex is common; drop it.
+                if verts.len() >= 2 && verts.first() == verts.last() {
+                    verts.pop();
+                }
+                if verts.len() >= 3 {
+                    ensure_ccw(&mut verts);
+                    apply_shape(&mut shapes, layers, layer_tok, PadShape::Convex(ConvexTile::from_ccw(verts)));
                 }
             }
-            // polygon shapes: skipped for the approximate pad footprint (TODO Phase 5+)
         }
         // A shape scope that produced no copper (e.g. empty `(shape)`) is still a
         // shapeless padstack as far as the router is concerned.
@@ -348,6 +376,21 @@ fn scale(v: f64, res: Resolution) -> i64 {
 
 fn scale_pt(x: f64, y: f64, res: Resolution) -> Point {
     Point::new(scale(x, res), scale(y, res))
+}
+
+/// Reverse `verts` in place if they are clockwise, so the polygon is CCW (the winding the
+/// ConvexTile predicates and the GUI fill assume). Uses the exact integer signed area.
+fn ensure_ccw(verts: &mut [Point]) {
+    let n = verts.len();
+    let mut area2: i128 = 0;
+    for i in 0..n {
+        let a = verts[i];
+        let b = verts[(i + 1) % n];
+        area2 += (a.x as i128) * (b.y as i128) - (b.x as i128) * (a.y as i128);
+    }
+    if area2 < 0 {
+        verts.reverse();
+    }
 }
 
 #[cfg(test)]

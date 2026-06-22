@@ -185,15 +185,14 @@ pub fn drc_trace_pin_short_count(board: &Board) -> usize {
             continue;
         }
         let pin_net = pin.net.unwrap_or(usize::MAX);
+        // Circumscribed radius across all pad shapes (circle radius or convex pad's
+        // farthest vertex), matching the obstacle index the router avoids. So the router
+        // keeps traces clear of this disc and the DRC checks the same disc -> consistent.
         let pad_r = ps
             .shapes
             .iter()
-            .filter_map(|s| match s {
-                Some(fr_board::PadShape::Circle { radius }) => Some(*radius),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0) as f64;
+            .filter_map(|s| pad_shape_extent(s.as_ref()))
+            .fold(0i64, i64::max) as f64;
         let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(0));
         for s in &segs {
             if s.net == pin_net || s.layer < lo || s.layer > hi {
@@ -223,6 +222,23 @@ struct RouteCtx<'a> {
 /// any pre-existing traces). This mirrors what the coarse `ObstacleMap` stamps, but keeps
 /// EXACT geometry so the A* edge validator can reject a trace segment that clips a pad
 /// between two passable grid cells (the trace-to-pad short the grid alone can't avoid).
+/// The circumscribed radius of a pad shape relative to its origin: the circle radius, or
+/// a convex pad's farthest vertex distance from the origin. None for an empty slot.
+fn pad_shape_extent(shape: Option<&PadShape>) -> Option<i64> {
+    match shape? {
+        PadShape::Circle { radius } => Some(*radius),
+        PadShape::Convex(tile) => {
+            let r2 = tile
+                .vertices()
+                .iter()
+                .map(|v| (v.x as i128) * (v.x as i128) + (v.y as i128) * (v.y as i128))
+                .max()
+                .unwrap_or(0);
+            Some((r2 as f64).sqrt().ceil() as i64)
+        }
+    }
+}
+
 pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
     let mut idx = ObstacleIndex::new(layers);
     for pin in &board.pins {
@@ -232,21 +248,23 @@ pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
         }
         let net = pin.net.map(|n| n as u32).unwrap_or(NO_NET);
         let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(layers - 1));
-        // Stamp the per-layer pad shape's radius (circle) so the exact distance test uses
-        // the real pad copper. Non-circle pads fall back to the max circle radius.
+        // A circumscribing radius covering ANY pad shape on the padstack (circle radius, or
+        // a convex pad's farthest vertex from the pad origin). Used as the fallback so a
+        // pad that has copper on a layer always stamps an obstacle that fully covers it —
+        // critically, rectangular/polygon-only pads (no circle shape) must NOT stamp a
+        // zero-radius disc (which would let traces cut through them).
         let max_r = ps
             .shapes
             .iter()
-            .filter_map(|s| match s {
-                Some(PadShape::Circle { radius }) => Some(*radius),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
+            .filter_map(|s| pad_shape_extent(s.as_ref()))
+            .fold(0i64, i64::max);
         for layer in lo..=hi.min(layers - 1) {
             let r = match ps.shapes.get(layer).and_then(|s| s.as_ref()) {
                 Some(PadShape::Circle { radius }) => *radius,
-                Some(PadShape::Convex(_)) | None => max_r,
+                // Convex pad: a disc of its circumscribed radius conservatively covers the
+                // true copper (over-reserves slightly at corners; never under-reserves).
+                Some(PadShape::Convex(_)) => max_r,
+                None => max_r, // no shape this layer but the padstack has copper elsewhere
             };
             if r > 0 {
                 idx.add_disc(layer, pin.location, r, net);
