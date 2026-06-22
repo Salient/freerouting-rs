@@ -14,9 +14,9 @@ fn no_trace_to_trace_shorts() {
         r.nets_completed, r.nets_total, board.traces.len(), board.vias.len(), tt, tp);
     // Trace-to-trace copper overlap must be zero (the incremental router guarantees it).
     assert_eq!(tt, 0, "trace-to-trace shorts: {tt}");
-    // Trace-to-pad shorts are a KNOWN residual of grid routing on dense boards (pads
-    // larger than the grid pitch); tracked here, to be eliminated by the free-angle
-    // room/door model (task #9). Gate generously so a regression that explodes them
-    // fails, without falsely claiming zero.
-    assert!(tp < 60, "trace-to-pad shorts regressed badly: {tp}");
+    // Trace-to-pad shorts must ALSO be zero: the exact-geometry edge validator
+    // (fr-spatial ObstacleIndex) rejects any A* trace segment that would clip a
+    // different-net pad/trace between two passable grid cells. This is the structural
+    // fix that the grid's node-center passability check could not provide.
+    assert_eq!(tp, 0, "trace-to-pad shorts: {tp}");
 }

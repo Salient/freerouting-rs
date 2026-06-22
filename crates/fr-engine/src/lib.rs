@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant};
 
 use fr_board::{Board, PadShape, Padstack, Pin};
-use fr_geometry::Point;
-use fr_route::{route_connection, Costs, Grid, ObstacleMap};
+use fr_geometry::{point_seg_dist, seg_seg_dist, Point};
+use fr_route::{route_connection, Costs, EdgeValidator, Grid, ObstacleIndex, ObstacleMap, NO_NET};
 
 /// Options controlling a routing run.
 #[derive(Clone, Copy, Debug)]
@@ -158,7 +158,7 @@ pub fn drc_violation_count(board: &Board, extra: f64) -> usize {
                 if !seen.insert(pair) {
                     continue;
                 }
-                let d = seg_seg_distance(si.a, si.b, sj.a, sj.b);
+                let d = seg_seg_dist(si.a, si.b, sj.a, sj.b);
                 if d < si.half + sj.half + extra - 1.0 {
                     violations += 1;
                 }
@@ -203,43 +203,6 @@ pub fn drc_trace_pin_short_count(board: &Board) -> usize {
     shorts
 }
 
-/// Minimum Euclidean distance between segment p1-p2 and segment q1-q2 (f64).
-fn seg_seg_distance(p1: Point, p2: Point, q1: Point, q2: Point) -> f64 {
-    // if they intersect, distance 0
-    if segments_intersect(p1, p2, q1, q2) {
-        return 0.0;
-    }
-    let d = [
-        point_seg_dist(p1, q1, q2),
-        point_seg_dist(p2, q1, q2),
-        point_seg_dist(q1, p1, p2),
-        point_seg_dist(q2, p1, p2),
-    ];
-    d.into_iter().fold(f64::MAX, f64::min)
-}
-
-fn point_seg_dist(p: Point, a: Point, b: Point) -> f64 {
-    let (px, py) = (p.x as f64, p.y as f64);
-    let (ax, ay) = (a.x as f64, a.y as f64);
-    let (bx, by) = (b.x as f64, b.y as f64);
-    let (dx, dy) = (bx - ax, by - ay);
-    let len2 = dx * dx + dy * dy;
-    if len2 == 0.0 {
-        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
-    }
-    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
-    let (cx, cy) = (ax + t * dx, ay + t * dy);
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
-}
-
-fn segments_intersect(p1: Point, p2: Point, q1: Point, q2: Point) -> bool {
-    use fr_geometry::Side;
-    let d1 = q1.side_of(q2, p1);
-    let d2 = q1.side_of(q2, p2);
-    let d3 = p1.side_of(p2, q1);
-    let d4 = p1.side_of(p2, q2);
-    d1 != d2 && d3 != d4 && d1 != Side::On && d2 != Side::On && d3 != Side::On && d4 != Side::On
-}
 
 /// Per-run routing context shared across nets (immutable).
 struct RouteCtx<'a> {
@@ -249,6 +212,55 @@ struct RouteCtx<'a> {
     max_expansions: usize,
     width: i64,
     clearance: i64,
+}
+
+/// Build the exact-geometry obstacle index from the board's static copper (pads/vias and
+/// any pre-existing traces). This mirrors what the coarse `ObstacleMap` stamps, but keeps
+/// EXACT geometry so the A* edge validator can reject a trace segment that clips a pad
+/// between two passable grid cells (the trace-to-pad short the grid alone can't avoid).
+fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
+    let mut idx = ObstacleIndex::new(layers);
+    for pin in &board.pins {
+        let Some(ps) = board.padstacks.get(pin.padstack) else { continue };
+        if ps.is_empty() {
+            continue;
+        }
+        let net = pin.net.map(|n| n as u32).unwrap_or(NO_NET);
+        let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(layers - 1));
+        // Stamp the per-layer pad shape's radius (circle) so the exact distance test uses
+        // the real pad copper. Non-circle pads fall back to the max circle radius.
+        let max_r = ps
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                Some(PadShape::Circle { radius }) => Some(*radius),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        for layer in lo..=hi.min(layers - 1) {
+            let r = match ps.shapes.get(layer).and_then(|s| s.as_ref()) {
+                Some(PadShape::Circle { radius }) => *radius,
+                Some(PadShape::Convex(_)) | None => max_r,
+            };
+            if r > 0 {
+                idx.add_disc(layer, pin.location, r, net);
+            }
+        }
+    }
+    for t in &board.traces {
+        let net = t.net.map(|n| n as u32).unwrap_or(NO_NET);
+        idx.add_trace(t.layer, &t.corners, t.width, net);
+    }
+    for v in &board.vias {
+        let net = v.net.map(|n| n as u32).unwrap_or(NO_NET);
+        let r = fr_route::via_radius(board, v.padstack, 0);
+        if r > 0 {
+            idx.add_via(0, layers - 1, v.location, r, net);
+        }
+    }
+    idx.build();
+    idx
 }
 
 /// Incremental router: route nets in id order against a single mutable obstacle map,
@@ -279,8 +291,13 @@ fn route_incremental(
     order.sort_by_key(|&nid| spans[nid]);
 
     let mut obs = ObstacleMap::build_with_clearance(board, ctx.grid, ctx.clearance);
+    // Exact-geometry obstacle index, used by the A* edge validator to reject trace
+    // segments that would clip a different-net pad/trace between two passable grid cells.
+    // Kept in lock-step with `obs`: every committed trace/via is added to BOTH.
+    let mut index = build_obstacle_index(board, ctx.grid.layers);
     let mut completed = vec![false; net_count];
     let via_r = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
+    let via_exact_r = fr_route::via_radius(board, ctx.via_padstack, 0).max(1);
 
     // Multi-pass: retry not-yet-completed nets. Later passes can succeed because the set
     // of committed traces differs, opening gaps; passes stop when one yields no progress
@@ -306,11 +323,17 @@ fn route_incremental(
             // net doesn't leave dangling stubs blocking the retry.
             let mut produced = Vec::new();
             let mut ok = true;
+            let validator = EdgeValidator {
+                index: &index,
+                half: ctx.width / 2,
+                clearance: ctx.clearance,
+            };
             for (ai, bi) in mst_edges(&pin_pts) {
                 match route_connection(
                     board, ctx.grid, &obs, net_id as u32,
                     pin_pts[ai], pin_pts[bi],
                     ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
+                    Some(&validator),
                 ) {
                     Some(c) => produced.push(c),
                     None => { ok = false; break; }
@@ -323,9 +346,11 @@ fn route_incremental(
                 for c in &produced {
                     for t in &c.traces {
                         obs.stamp_trace(t.layer, &t.corners, t.width, net_id as u32);
+                        index.add_trace(t.layer, &t.corners, t.width, net_id as u32);
                     }
                     for v in &c.vias {
                         obs.stamp_via(v.location, via_r, net_id as u32);
+                        index.add_via(0, ctx.grid.layers - 1, v.location, via_exact_r, net_id as u32);
                     }
                 }
                 report.connections_routed += produced.len();

@@ -10,6 +10,30 @@ use std::collections::BinaryHeap;
 
 use crate::grid::{Grid, Node};
 use crate::obstacles::ObstacleMap;
+use fr_geometry::Point;
+use fr_spatial::ObstacleIndex;
+
+/// Exact-geometry gate on an A* in-plane edge: the trace segment swept between two node
+/// centers must keep `clearance` from every different-net copper shape in `index`. This
+/// is what the coarse grid's node-center passability check misses — a segment (especially
+/// a diagonal) can run between two passable cells yet clip a pad larger than the pitch.
+/// Supplying this validator makes the search reject such edges, structurally removing the
+/// trace-to-pad shorts the grid alone cannot avoid.
+#[derive(Clone, Copy)]
+pub struct EdgeValidator<'a> {
+    pub index: &'a ObstacleIndex,
+    /// Half the routed trace width (board units).
+    pub half: i64,
+    /// Required copper clearance (board units).
+    pub clearance: i64,
+}
+
+impl EdgeValidator<'_> {
+    /// True if the trace segment from `a` to `b` on `layer` is clear for `net`.
+    fn edge_clear(&self, layer: u32, a: Point, b: Point, net: u32) -> bool {
+        self.index.segment_is_clear(layer as usize, a, b, self.half, net, self.clearance)
+    }
+}
 
 /// Cost parameters for the search (board-unit scaled).
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +98,7 @@ fn heuristic(a: Node, b: Node, c: &Costs) -> i64 {
 /// Find a least-cost path from any node in `starts` to any node in `goals`, staying on
 /// cells passable for `net`. Returns the node path start..goal, or None if unreachable.
 /// `max_expansions` bounds the work (so a hard net cannot stall the whole board).
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     grid: &Grid,
     obs: &ObstacleMap,
@@ -82,6 +107,7 @@ pub fn search(
     goals: &[Node],
     costs: &Costs,
     max_expansions: usize,
+    validator: Option<&EdgeValidator>,
 ) -> Option<Vec<Node>> {
     if starts.is_empty() || goals.is_empty() {
         return None;
@@ -130,6 +156,13 @@ pub fn search(
             let nb = Node { layer: node.layer, col: node.col + dc, row: node.row + dr };
             if !obs.passable(nb, net) {
                 continue;
+            }
+            // Exact-geometry gate: the trace segment swept between these two node centers
+            // must clear different-net copper. Rejects sub-cell clips the grid misses.
+            if let Some(v) = validator {
+                if !v.edge_clear(node.layer, grid.point_of(node), grid.point_of(nb), net) {
+                    continue;
+                }
             }
             let move_cost = if dc != 0 && dr != 0 { costs.diag } else { costs.step };
             relax(node, nb, g + move_cost, href, costs, &id, &mut g_score, &mut came_from, &mut open);
@@ -216,7 +249,7 @@ mod tests {
         let start = grid.node_at(0, Point::new(100_000, 500_000));
         let goal = grid.node_at(0, Point::new(900_000, 500_000));
         let costs = Costs::for_grid(&grid, 500_000);
-        let path = search(&grid, &obs, 0, &[start], &[goal], &costs, 100_000).expect("path exists");
+        let path = search(&grid, &obs, 0, &[start], &[goal], &costs, 100_000, None).expect("path exists");
         assert_eq!(*path.first().unwrap(), start);
         assert_eq!(*path.last().unwrap(), goal);
     }
@@ -234,7 +267,7 @@ mod tests {
         let goal = grid.node_at(0, Point::new(900_000, 500_000));
         let costs = Costs::for_grid(&grid, 500_000);
         // routing net 0 must detour around net 1's pin
-        let path = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000).expect("detour path");
+        let path = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000, None).expect("detour path");
         // no node of the path is the blocked center
         let center = grid.node_at(0, Point::new(500_000, 500_000));
         assert!(!path.contains(&center));
@@ -248,8 +281,8 @@ mod tests {
         let start = grid.node_at(0, Point::new(100_000, 100_000));
         let goal = grid.node_at(0, Point::new(900_000, 900_000));
         let costs = Costs::for_grid(&grid, 500_000);
-        let p1 = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000).unwrap();
-        let p2 = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000).unwrap();
+        let p1 = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000, None).unwrap();
+        let p2 = search(&grid, &obs, 0, &[start], &[goal], &costs, 1_000_000, None).unwrap();
         assert_eq!(p1, p2, "search must be deterministic");
     }
 }

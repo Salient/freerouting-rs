@@ -12,11 +12,13 @@
 
 mod box2d;
 mod convex;
+mod dist;
 mod point;
 mod polygon;
 
 pub use box2d::IntBox;
 pub use convex::ConvexTile;
+pub use dist::{point_seg_dist, seg_seg_dist, segments_intersect};
 pub use point::{signed_area2, FloatPoint, Point, Side, Vector};
 pub use polygon::polygon_contains;
 
