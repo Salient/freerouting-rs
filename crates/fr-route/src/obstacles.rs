@@ -8,7 +8,25 @@
 
 use crate::grid::{Grid, Node};
 use fr_board::Board;
-use fr_geometry::Point;
+use fr_geometry::{polygon_contains, Point};
+
+/// True if `p` and its four points offset by `margin` are all inside the outline, i.e.
+/// `p` is at least ~`margin` inside the board edge. A cheap proxy for edge clearance.
+fn inside_with_margin(outline: &[Point], p: Point, margin: i64) -> bool {
+    if !polygon_contains(outline, p) {
+        return false;
+    }
+    if margin <= 0 {
+        return true;
+    }
+    let probes = [
+        Point::new(p.x + margin, p.y),
+        Point::new(p.x - margin, p.y),
+        Point::new(p.x, p.y + margin),
+        Point::new(p.x, p.y - margin),
+    ];
+    probes.iter().all(|&q| polygon_contains(outline, q))
+}
 
 pub struct ObstacleMap<'a> {
     grid: &'a Grid,
@@ -73,7 +91,36 @@ impl<'a> ObstacleMap<'a> {
             map.stamp_via(v.location, r, net);
         }
 
+        // Block every cell whose center is outside the board outline (or within the edge
+        // clearance of it), on all layers, owned by nobody, so nothing routes off-board.
+        // Without this the rectangular grid (plus its margin) lets traces stray outside a
+        // non-rectangular (e.g. L-shaped) board.
+        map.block_outside_outline(board);
+
         map
+    }
+
+    /// Mark all cells outside the board outline (with edge clearance) as permanently
+    /// blocked (NO_OWNER, so no net can use them).
+    fn block_outside_outline(&mut self, board: &Board) {
+        if board.outline.len() < 3 {
+            return; // no usable outline; leave the grid open
+        }
+        // shrink the inside test by edge clearance: a cell must be at least `edge` inside
+        let edge = board.rules.edge_clearance;
+        for layer in 0..self.grid.layers {
+            for col in 0..self.grid.cols as i32 {
+                for row in 0..self.grid.rows as i32 {
+                    let n = Node { layer: layer as u32, col, row };
+                    let p = self.grid.point_of(n);
+                    if !inside_with_margin(&board.outline, p, edge) {
+                        let i = self.idx(n);
+                        self.blocked[layer][i] = true;
+                        self.owner[layer][i] = NO_OWNER;
+                    }
+                }
+            }
+        }
     }
 
     /// Stamp a routed trace (full rasterized path, width + clearance) tagged with `net`.

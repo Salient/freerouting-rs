@@ -13,10 +13,12 @@
 mod box2d;
 mod convex;
 mod point;
+mod polygon;
 
 pub use box2d::IntBox;
 pub use convex::ConvexTile;
 pub use point::{signed_area2, FloatPoint, Point, Side, Vector};
+pub use polygon::polygon_contains;
 
 /// A board coordinate in integer board units.
 pub type Coord = i64;

@@ -53,49 +53,55 @@ fn path_to_geometry(
         return out;
     }
 
-    let mut run: Vec<Point> = Vec::new();
-    let mut run_layer = path[0].layer;
-    run.push(grid.point_of(path[0]));
+    // Split the path into maximal same-layer segments. A layer change between node i and
+    // i+1 happens at the SAME (col,row) (via moves don't change col/row), so the boundary
+    // point is shared by the segment that ends there and the one that begins there. We
+    // emit a via at every such boundary, and a trace for each segment with >=2 distinct
+    // points. Because each via sits exactly on the shared boundary point of both adjacent
+    // segments, layer-to-layer connectivity is preserved even when a segment is a single
+    // point (a straight stacked transition) and therefore produces no trace.
+    let pts: Vec<Point> = path.iter().map(|&n| grid.point_of(n)).collect();
 
-    for w in path.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if b.layer != a.layer {
-            // layer change: close the current run as a trace, drop a via, start new run
-            flush_run(&mut out, &mut run, run_layer, width, net);
+    let mut seg_start = 0usize;
+    for i in 0..path.len() - 1 {
+        let layer_changes = path[i + 1].layer != path[i].layer;
+        if layer_changes {
+            // close the current segment [seg_start..=i] on path[i].layer
+            emit_trace(&mut out, &pts[seg_start..=i], path[i].layer, width, net);
+            // via at the boundary point (path[i] and path[i+1] share col/row)
             if let Some(ps) = via_padstack {
                 out.vias.push(Via {
                     padstack: ps,
-                    location: grid.point_of(a),
+                    location: pts[i],
                     net: Some(net as usize),
                     fixed: FixedState::Route,
                 });
             }
-            run_layer = b.layer;
-            run.push(grid.point_of(a)); // via location starts the new run
-            run.push(grid.point_of(b));
-        } else {
-            run.push(grid.point_of(b));
+            seg_start = i + 1;
         }
     }
-    flush_run(&mut out, &mut run, run_layer, width, net);
+    // final segment
+    emit_trace(&mut out, &pts[seg_start..], path[path.len() - 1].layer, width, net);
     out
 }
 
-/// Collapse collinear points and emit a trace if >= 2 distinct points remain.
-fn flush_run(out: &mut RoutedConnection, run: &mut Vec<Point>, layer: u32, width: i64, net: u32) {
-    if run.len() >= 2 {
-        let simplified = simplify_collinear(run);
-        if simplified.len() >= 2 {
-            out.traces.push(Trace {
-                layer: layer as usize,
-                width,
-                corners: simplified,
-                net: Some(net as usize),
-                fixed: FixedState::Route,
-            });
-        }
+/// Emit a trace for a same-layer run of points, if it has >= 2 distinct points after
+/// collinear simplification. A single-point run produces no trace (its connectivity is
+/// carried by the vias at its endpoints, which sit on the same point).
+fn emit_trace(out: &mut RoutedConnection, run: &[Point], layer: u32, width: i64, net: u32) {
+    if run.len() < 2 {
+        return;
     }
-    run.clear();
+    let simplified = simplify_collinear(run);
+    if simplified.len() >= 2 {
+        out.traces.push(Trace {
+            layer: layer as usize,
+            width,
+            corners: simplified,
+            net: Some(net as usize),
+            fixed: FixedState::Route,
+        });
+    }
 }
 
 /// Remove interior points that lie on the straight line between their neighbours, and
@@ -137,6 +143,41 @@ mod tests {
             .collect();
         b.layers = LayerStack::new(ls);
         b
+    }
+
+    #[test]
+    fn via_at_every_layer_change_connecting_traces() {
+        let grid = Grid::new(IntBox::new(0, 0, 1_000_000, 1_000_000), 50_000, 2);
+        // path: move on layer 0, change to layer 1 (same col/row), move on layer 1.
+        let n = |layer, col, row| Node { layer, col, row };
+        let path = vec![
+            n(0, 2, 5), n(0, 5, 5),      // layer 0 run
+            n(1, 5, 5),                   // via to layer 1 at (5,5)
+            n(1, 8, 5),                   // layer 1 run
+        ];
+        let conn = path_to_geometry(&empty_board(2), &grid, 0, &path, 100_000, Some(0));
+        // exactly one via, at the boundary point (col 5,row 5)
+        assert_eq!(conn.vias.len(), 1, "one via at the single layer change");
+        let via_pt = conn.vias[0].location;
+        assert_eq!(via_pt, grid.point_of(n(0, 5, 5)));
+        // two traces, one per layer, and each touches the via point
+        assert_eq!(conn.traces.len(), 2, "a trace on each layer");
+        let touches_via = |t: &fr_board::Trace| t.corners.first() == Some(&via_pt) || t.corners.last() == Some(&via_pt);
+        assert!(conn.traces.iter().all(touches_via), "both traces meet at the via");
+    }
+
+    #[test]
+    fn single_point_layer_run_keeps_vias_chained() {
+        // path that changes layer twice at the SAME point (0->1->2): the middle layer-1
+        // run is a single point and produces no trace, but the two vias share that point
+        // so connectivity is preserved.
+        let grid = Grid::new(IntBox::new(0, 0, 1_000_000, 1_000_000), 50_000, 3);
+        let n = |layer, col, row| Node { layer, col, row };
+        let path = vec![n(0, 2, 5), n(0, 5, 5), n(1, 5, 5), n(2, 5, 5), n(2, 8, 5)];
+        let conn = path_to_geometry(&empty_board(3), &grid, 0, &path, 100_000, Some(0));
+        assert_eq!(conn.vias.len(), 2, "two layer changes -> two vias");
+        // both vias at the same point (5,5)
+        assert_eq!(conn.vias[0].location, conn.vias[1].location);
     }
 
     #[test]
