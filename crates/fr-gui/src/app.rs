@@ -45,6 +45,7 @@ pub struct App {
     router: Option<InteractiveRouter>,
     snap_angle: AngleRestriction,
     allow_vias: bool,
+    shove: bool,
     active_layer: usize,
 
     // file browser
@@ -76,6 +77,7 @@ impl Default for App {
             router: None,
             snap_angle: AngleRestriction::None,
             allow_vias: true,
+            shove: false,
             active_layer: 0,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
@@ -159,11 +161,19 @@ impl App {
                 "Manual route started on layer {layer}, net {net}. Click to place; right-click/Esc to finish."
             );
         } else if let Some(board) = self.board.as_mut() {
-            if router.commit(board, p, layer) {
+            if self.shove {
+                let out = router.commit_shove(board, p, layer);
+                self.last_report = None;
+                self.status = if out.committed {
+                    format!("Placed segment (shove: {} rerouted, {} dropped).", out.rerouted, out.dropped)
+                } else {
+                    "No route even with shove (try another path or layer).".into()
+                };
+            } else if router.commit(board, p, layer) {
                 self.last_report = None;
                 self.status = "Placed a manual route segment.".into();
             } else {
-                self.status = "No clear route to that point (try another path or layer).".into();
+                self.status = "No clear route to that point (enable Shove, or try another path/layer).".into();
             }
         }
     }
@@ -638,6 +648,7 @@ impl eframe::App for App {
                         changed |= ui.selectable_value(&mut self.snap_angle, AngleRestriction::Ninety, "90°").clicked();
                     });
                     let vias_changed = ui.checkbox(&mut self.allow_vias, "Allow vias (layer changes)").changed();
+                    ui.checkbox(&mut self.shove, "Shove (rip-up & reroute blockers)");
                     ui.horizontal(|ui| {
                         ui.label("Active layer:");
                         ui.add(egui::DragValue::new(&mut self.active_layer).range(0..=(layer_count.saturating_sub(1))));
