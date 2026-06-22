@@ -64,6 +64,7 @@ fn roomdoor_routes_real_two_pin_nets_cleanly() {
         let straight = poly_len(&[a, b]);
         if let Some(conn) = route_connection_roomdoor(
             &index, la, net_id as u32, a, b, width, clearance, bound, 4000,
+            fr_route::AngleRestriction::None,
         ) {
             routed += 1;
             let t = &conn.traces[0];

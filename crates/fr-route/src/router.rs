@@ -54,6 +54,7 @@ pub fn route_connection_roomdoor(
     clearance: i64,
     bound: fr_geometry::IntBox,
     max_rooms: usize,
+    angle: crate::locate::AngleRestriction,
 ) -> Option<RoutedConnection> {
     let half = width / 2;
     let step = (width + clearance).max(1);
@@ -76,7 +77,7 @@ pub fn route_connection_roomdoor(
         window,
     };
     let path = crate::maze::find_path(index, start_pt, goal_pt, &params)?;
-    let corners = crate::locate::straighten(index, &path, net, half, clearance)?;
+    let corners = crate::locate::straighten_angled(index, &path, net, half, clearance, angle)?;
     if corners.len() < 2 {
         return None;
     }

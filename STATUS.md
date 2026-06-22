@@ -56,18 +56,25 @@ Honest DRC status: the DRC uses true copper geometry (trace WIDTH + pad radius).
 trace-to-trace == 0 (incremental stamping) and trace-to-PAD == 0 (exact edge validator,
 above). The output is now electrically clean on the real board.
 
-Remaining / future:
-- **Free-angle room/door search model (task #9)** - electrical cleanliness is now
-  achieved on a grid via the exact validator, so the room/door model is no longer
-  required for correctness. Its remaining value is QUALITY: lifting completion past ~76%
-  and producing any-angle / shorter traces. Still the biggest quality lever, but
-  optional now rather than blocking.
+Free-angle room/door model (in progress; see crates/fr-route/ROOMDOOR_DESIGN.md):
+faithful port of the Java autoroute model, built in stages, each committed + tested.
+- DONE stages 1-4 + validation: free-space rooms (restrain_shape port), doors,
+  maze A*, any-angle backtrace, and a single-connection router
+  (`route_connection_roomdoor`). Proven on the real board (tests/roomdoor_ab.rs):
+  36/81 sampled two-pin same-layer nets route any-angle, ALL DRC-clean, total length
+  near the straight-line lower bound.
+- TODO stages 5-8: angle restriction (45/90 snap; unblocks GUI snap setting), vias/
+  multi-layer, push/shove, interactive single-trace GUI wiring (drag-route + pad exit).
+- The GRID router remains the default batch router (electrically clean via the exact
+  validator); the room/door model is being brought to parity before replacing it.
+
+GUI (post-Tier-1): real per-layer pad shapes, filled board outline with contrast, and
+trace/pad/via selection + hover info + selection panel. (padgeom.rs / picking.rs.)
+
 - Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
 
-Note: Phase 2 (fr-spatial / rstar R-tree) is now USED: `ObstacleIndex` backs the A*
-exact edge validator. The free-angle room/door model (the spec's end-goal search space)
-is still NOT built — the current router uses a uniform grid + exact-geometry edge gating
-as a working, electrically-clean stand-in (same A* driver).
+Note: Phase 2 (fr-spatial / rstar R-tree) is now USED: `ObstacleIndex` backs both the
+grid A* exact edge validator AND the room/door model's obstacle queries.
 
 ## Verified end-to-end (current)
 

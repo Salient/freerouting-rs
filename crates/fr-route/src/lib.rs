@@ -16,6 +16,7 @@ pub mod router;
 pub use astar::{Costs, EdgeValidator};
 pub use grid::{Grid, Node};
 pub use obstacles::{via_radius, ObstacleMap};
+pub use locate::AngleRestriction;
 pub use router::{route_connection, route_connection_roomdoor, RoutedConnection};
 
 // Re-export the exact obstacle index so the engine can build/query it via fr-route.
