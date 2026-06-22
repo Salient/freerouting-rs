@@ -32,9 +32,21 @@ re-deriving context. The authoritative spec is in `../freerouting-rs-spec/`.
 | 8 | Parallelism + perf (rayon scheduler + bench) | DONE | ~2.8x speedup, deterministic, 372/417 nets |
 | 9 | Acceptance | DONE | ACCEPTANCE.md; baseline_rs.rte produced |
 
-All phases complete. Remaining work is refinement/future (see ACCEPTANCE.md "Remaining"):
-real-Altium import confirmation by a human, quality A/B vs the Java oracle, RSS
-comparison, and the free-angle room/door search space to replace the grid.
+All phases complete. Post-acceptance correctness/quality work done:
+- Fixed trace SHORTING (incremental routing + width/clearance stamping; DRC gate ==0).
+- Fixed via padstack selection (uses the board's real routing via, not an arbitrary pad).
+- Routing quality: local-first net ordering + multi-pass retry -> 374/417 nets (90%),
+  934 traces, 49 vias, 0 shorts on the real board, ~3.5s.
+- GUI runs on WSLg via the eframe wgpu backend; Open via typed path (native dialog
+  unavailable under WSLg).
+
+Remaining / future:
+- GUI/UX wishlist (task #8): progress+live redraw, ratsnest/incompletes, zoom-fit +
+  net highlight, legend/visuals, routing-parameter config menu, manual commands, and a
+  proper in-app file selector.
+- Free-angle room/door search model (task #9) for the last ~10% completion and
+  any-angle/shorter traces; full rip-up-and-reroute.
+- Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
 
 Note: Phase 2 (fr-spatial / rstar R-tree) is stubbed; the grid router doesn't need it
 yet. The free-angle room/door model (the spec's end-goal search space) is NOT yet built
