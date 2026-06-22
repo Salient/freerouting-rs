@@ -3,3 +3,7 @@
 Cargo.lock.bak
 /artifacts/*.png
 /artifacts/*.rte
+
+# fr-gui builds standalone (excluded from workspace) -> its own target/
+crates/fr-gui/target
+crates/fr-gui/Cargo.lock

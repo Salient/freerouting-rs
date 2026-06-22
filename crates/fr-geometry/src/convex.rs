@@ -7,7 +7,7 @@
 //! half-plane view when needed. All predicates are exact integer arithmetic.
 
 use crate::box2d::IntBox;
-use crate::point::{signed_area2, Point, Side};
+use crate::point::{Point, Side};
 
 /// A convex polygon given by vertices in counter-clockwise order. May be empty
 /// (no vertices), degenerate (1-2 vertices), or a proper polygon (>= 3 vertices).

@@ -4,5 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
+[[bin]]
+name = "freerouting-rs-gui"
+path = "src/main.rs"
+
 [dependencies]
-# egui/eframe added in Phase 7 (needs system GUI libs)
+fr-geometry = { path = "../fr-geometry" }
+fr-board = { path = "../fr-board" }
+fr-dsn = { path = "../fr-dsn" }
+fr-engine = { path = "../fr-engine" }
+eframe = "0.29"
+egui = "0.29"
+rfd = "0.15"
