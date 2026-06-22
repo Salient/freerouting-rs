@@ -20,6 +20,10 @@ pub struct App {
     last_report: Option<RouteReport>,
     max_time: u64,
     loaded_path: Option<PathBuf>,
+    /// In-app path text box. The native file dialog (rfd) needs a desktop portal that
+    /// isn't present under WSLg, so a typed path is the reliable cross-environment way
+    /// to open/save. The Open/Export buttons act on this field.
+    path_input: String,
 }
 
 impl Default for App {
@@ -28,10 +32,11 @@ impl Default for App {
             board: None,
             view: None,
             layer_visible: Vec::new(),
-            status: "Open a Specctra .dsn to begin.".into(),
+            status: "Type a .dsn path and click Open (or pass one on the command line).".into(),
             last_report: None,
             max_time: 30,
             loaded_path: None,
+            path_input: String::new(),
         }
     }
 }
@@ -50,10 +55,21 @@ impl App {
                 );
                 self.view = None; // refit on next paint
                 self.board = Some(board);
+                self.path_input = path.display().to_string();
                 self.loaded_path = Some(path);
             }
-            Err(e) => self.status = format!("Failed to read file: {e}"),
+            Err(e) => self.status = format!("Failed to read '{}': {e}", path.display()),
         }
+    }
+
+    /// Output path for an export: the loaded DSN path with its extension replaced, or a
+    /// fallback in the current directory if nothing is loaded.
+    fn derived_output(&self, ext: &str) -> PathBuf {
+        let base = self
+            .loaded_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("freerouting-rs-output.dsn"));
+        base.with_extension(ext)
     }
 
     pub fn route(&mut self) {
@@ -163,29 +179,50 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            // Row 1: a path text box (reliable everywhere; the native dialog needs a
+            // portal absent under WSLg) + Open, with a best-effort native Browse.
             ui.horizontal(|ui| {
-                if ui.button("Open DSN…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Specctra DSN", &["dsn"]).pick_file() {
-                        self.load_path(path);
+                ui.label("DSN path:");
+                let te = ui.add(
+                    egui::TextEdit::singleline(&mut self.path_input)
+                        .desired_width(520.0)
+                        .hint_text("/path/to/board.dsn"),
+                );
+                let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Open").clicked() || enter {
+                    let p = self.path_input.trim().to_string();
+                    if p.is_empty() {
+                        self.status = "Enter a .dsn path first.".into();
+                    } else {
+                        self.load_path(PathBuf::from(p));
                     }
                 }
-                ui.separator();
+                if ui.button("Browse…").clicked() {
+                    // try the native dialog; harmless no-op if no portal is available
+                    if let Some(path) =
+                        rfd::FileDialog::new().add_filter("Specctra DSN", &["dsn"]).pick_file()
+                    {
+                        self.load_path(path);
+                    } else {
+                        self.status = "Native file dialog unavailable here - type the path and click Open.".into();
+                    }
+                }
+            });
+            // Row 2: route + export controls.
+            ui.horizontal(|ui| {
                 ui.label("Max time (s):");
                 ui.add(egui::DragValue::new(&mut self.max_time).range(0..=600));
                 if ui.add_enabled(self.board.is_some(), egui::Button::new("Route")).clicked() {
                     self.route();
                 }
                 ui.separator();
-                if ui.add_enabled(self.board.is_some(), egui::Button::new("Export RTE…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Specctra Route", &["rte"]).save_file() {
-                        self.export(path);
-                    }
+                if ui.add_enabled(self.board.is_some(), egui::Button::new("Export RTE")).clicked() {
+                    self.export(self.derived_output("rte"));
                 }
-                if ui.add_enabled(self.board.is_some(), egui::Button::new("Export SES…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Specctra Session", &["ses"]).save_file() {
-                        self.export(path);
-                    }
+                if ui.add_enabled(self.board.is_some(), egui::Button::new("Export SES")).clicked() {
+                    self.export(self.derived_output("ses"));
                 }
+                ui.label("(exports next to the DSN)");
             });
         });
 
