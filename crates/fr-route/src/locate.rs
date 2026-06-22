@@ -137,8 +137,8 @@ mod tests {
         index.build();
         let bound = IntBox::new(0, 0, 10_000, 10_000);
         let params = MazeParams {
-            net: 0, clearance: 0, half_width: 10, bound,
-            step: 40, dedup_cell: 40, max_rooms: 5000,
+            net: 0, layer: 0, clearance: 0, half_width: 10, bound,
+            step: 40, dedup_cell: 40, max_rooms: 5000, window: 0,
         };
         let path = find_path(&index, Point::new(1000, 5000), Point::new(9000, 5000), &params)
             .expect("maze path");

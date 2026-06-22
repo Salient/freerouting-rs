@@ -39,6 +39,58 @@ pub fn route_connection(
     Some(path_to_geometry(board, grid, net, &path, width, via_padstack))
 }
 
+/// Route a two-pin connection of `net` from `start_pt` to `goal_pt` on a single layer
+/// using the free-angle room/door model (maze search + any-angle backtrace). Returns the
+/// produced trace, or None if no clear path was found. This is the any-angle alternative
+/// to the grid `route_connection`; vias / multi-layer come in a later stage.
+#[allow(clippy::too_many_arguments)]
+pub fn route_connection_roomdoor(
+    index: &fr_spatial::ObstacleIndex,
+    layer: usize,
+    net: u32,
+    start_pt: Point,
+    goal_pt: Point,
+    width: i64,
+    clearance: i64,
+    bound: fr_geometry::IntBox,
+    max_rooms: usize,
+) -> Option<RoutedConnection> {
+    let half = width / 2;
+    let step = (width + clearance).max(1);
+    // Local room window: large enough to detour generously around obstacles between the
+    // pins, but far smaller than the whole board so obstacle queries stay cheap. Scale to
+    // the start-goal span (plus a fixed pad for short connections).
+    let span = (((goal_pt.x - start_pt.x) as f64).powi(2)
+        + ((goal_pt.y - start_pt.y) as f64).powi(2))
+    .sqrt() as i64;
+    let window = (span + 20 * step).max(40 * step);
+    let params = crate::maze::MazeParams {
+        net,
+        layer,
+        clearance,
+        half_width: half,
+        bound,
+        step,
+        dedup_cell: step,
+        max_rooms,
+        window,
+    };
+    let path = crate::maze::find_path(index, start_pt, goal_pt, &params)?;
+    let corners = crate::locate::straighten(index, &path, net, half, clearance)?;
+    if corners.len() < 2 {
+        return None;
+    }
+    let mut out = RoutedConnection::default();
+    out.traces.push(Trace {
+        layer,
+        width,
+        corners,
+        net: Some(net as usize),
+        fixed: FixedState::Route,
+    });
+    Some(out)
+}
+
 /// Convert an A* node path into traces (collinear runs collapsed) + vias at layer
 /// changes. Snaps endpoints to the true pin points so traces meet pads exactly.
 fn path_to_geometry(

@@ -27,10 +27,12 @@ pub struct PathPoint {
     pub layer: usize,
 }
 
-/// Parameters for a maze search (single net, single layer for stage 3).
+/// Parameters for a maze search (single net, single layer for stage 3/4).
 #[derive(Clone, Copy, Debug)]
 pub struct MazeParams {
     pub net: u32,
+    /// The layer the search runs on (rooms, doors and clearance are all on this layer).
+    pub layer: usize,
     pub clearance: i64,
     pub half_width: i64,
     pub bound: IntBox,
@@ -40,6 +42,28 @@ pub struct MazeParams {
     pub dedup_cell: i64,
     /// Safety cap on room expansions.
     pub max_rooms: usize,
+    /// Max half-extent of a single room (board units): rooms are grown only within this
+    /// window around their seed, so obstacle queries and clipping stay local (matching the
+    /// Java lazy-local expansion). 0 = unbounded (use the full bound; for small tests).
+    pub window: i64,
+}
+
+impl MazeParams {
+    /// The effective room bound around `seed`: the global bound intersected with the local
+    /// window (if any).
+    fn room_bound(&self, seed: Point) -> IntBox {
+        if self.window <= 0 {
+            return self.bound;
+        }
+        let w = self.window;
+        let win = IntBox::new(seed.x - w, seed.y - w, seed.x + w, seed.y + w);
+        IntBox::new(
+            self.bound.ll.x.max(win.ll.x),
+            self.bound.ll.y.max(win.ll.y),
+            self.bound.ur.x.min(win.ur.x),
+            self.bound.ur.y.min(win.ur.y),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -97,10 +121,10 @@ pub fn find_path(
     goal: Point,
     p: &MazeParams,
 ) -> Option<Vec<PathPoint>> {
-    let start_layer = 0usize; // stage 3: single layer 0
-    // seed the first room at the start point
+    let start_layer = p.layer; // single-layer search on the requested layer
+    // seed the first room at the start point (grown within a local window for speed)
     let start_room = complete_room(
-        index, start_layer, start, p.net, p.clearance, p.half_width, p.bound,
+        index, start_layer, start, p.net, p.clearance, p.half_width, p.room_bound(start),
     )?;
     let mut nodes: Vec<Node> = vec![Node { point: start, layer: start_layer, parent: u32::MAX }];
     // if the start room already contains the goal and the direct segment is clear, the
@@ -135,7 +159,7 @@ pub fn find_path(
             return None;
         }
         let Some(room) = complete_room(
-            index, fr.layer, fr.seed, p.net, p.clearance, p.half_width, p.bound,
+            index, fr.layer, fr.seed, p.net, p.clearance, p.half_width, p.room_bound(fr.seed),
         ) else {
             continue;
         };
@@ -269,12 +293,14 @@ mod tests {
     fn params(bound: IntBox) -> MazeParams {
         MazeParams {
             net: 0,
+            layer: 0,
             clearance: 0,
             half_width: 10,
             bound,
             step: 40,
             dedup_cell: 40,
             max_rooms: 5000,
+            window: 0,
         }
     }
 

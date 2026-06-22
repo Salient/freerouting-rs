@@ -218,7 +218,7 @@ struct RouteCtx<'a> {
 /// any pre-existing traces). This mirrors what the coarse `ObstacleMap` stamps, but keeps
 /// EXACT geometry so the A* edge validator can reject a trace segment that clips a pad
 /// between two passable grid cells (the trace-to-pad short the grid alone can't avoid).
-fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
+pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
     let mut idx = ObstacleIndex::new(layers);
     for pin in &board.pins {
         let Some(ps) = board.padstacks.get(pin.padstack) else { continue };
@@ -471,7 +471,7 @@ pub fn net_ratsnest(board: &Board, net_id: usize) -> Vec<(Point, Point)> {
     mst_edges(&pts).into_iter().map(|(a, b)| (pts[a], pts[b])).collect()
 }
 
-fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
+pub fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
     let mut pts: Vec<Point> = board.pins_of_net(net_id).map(|p| p.location).collect();
     pts.sort_by_key(|p| (p.x, p.y));
     pts.dedup();
