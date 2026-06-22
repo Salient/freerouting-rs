@@ -5,6 +5,11 @@
 
 use std::time::{Duration, Instant};
 
+pub mod interactive;
+
+pub use fr_route::AngleRestriction;
+pub use interactive::InteractiveRouter;
+
 use fr_board::{Board, PadShape, Padstack, Pin};
 use fr_geometry::{point_seg_dist, seg_seg_dist, Point};
 use fr_route::{route_connection, Costs, EdgeValidator, Grid, ObstacleIndex, ObstacleMap, NO_NET};
@@ -498,6 +503,12 @@ fn choose_pitch(board: &Board, bounds: fr_geometry::IntBox) -> i64 {
     let span = bounds.width().max(bounds.height()).max(1);
     let floor = span / 1500;
     want.max(floor).max(1)
+}
+
+/// Public wrapper: ensure the board has a routing-via padstack and return its index
+/// (used by the interactive router to build vias).
+pub fn ensure_via_padstack_pub(board: &mut Board) -> usize {
+    ensure_via_padstack(board)
 }
 
 fn ensure_via_padstack(board: &mut Board) -> usize {
