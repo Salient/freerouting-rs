@@ -54,6 +54,9 @@ pub struct App {
     // stands out. Configurable; on by default.
     fade_inactive: bool,
 
+    // show the clearance keepout boundary around obstacles (copper + design clearance).
+    show_clearance: bool,
+
     // file browser
     show_browser: bool,
     browser_dir: PathBuf,
@@ -88,6 +91,7 @@ impl Default for App {
             shove: false,
             active_layer: 0,
             fade_inactive: true,
+            show_clearance: false,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
@@ -387,6 +391,46 @@ impl App {
             }
         }
 
+        // clearance boundaries: the keepout halo (copper + design clearance) around
+        // obstacles, so the user sees where routing can't go. Shown when toggled on or in
+        // route mode (where it's most useful); a faint magenta outline.
+        if self.show_clearance || self.route_mode {
+            let clr = board.rules.default_clearance as f64;
+            let halo = Color32::from_rgba_unmultiplied(230, 120, 230, 90);
+            for pin in &board.pins {
+                if let Some(shape) = crate::padgeom::pin_pad_shape(board, pin) {
+                    match shape {
+                        crate::padgeom::PadDraw::Circle { center, radius } => {
+                            let r = ((radius as f64 + clr) * view_ro.scale) as f32;
+                            painter.circle_stroke(view_ro.to_screen(center, screen), r.max(1.0),
+                                Stroke::new(1.0, halo));
+                        }
+                        crate::padgeom::PadDraw::Poly(verts) => {
+                            // approximate the inflated polygon by an outline offset: draw the
+                            // polygon edges plus a ring at the centroid radius+clr.
+                            let pts: Vec<Pos2> = verts.iter().map(|&p| view_ro.to_screen(p, screen)).collect();
+                            for i in 0..pts.len() {
+                                painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], Stroke::new(1.0, halo));
+                            }
+                        }
+                    }
+                }
+            }
+            // trace clearance: a wider faint stroke around each visible trace.
+            for t in &board.traces {
+                if t.layer >= self.layer_visible.len() || !self.layer_visible[t.layer] {
+                    continue;
+                }
+                let w = (((t.width as f64 + 2.0 * clr) * view_ro.scale).max(1.0) as f32).min(40.0);
+                for seg in t.corners.windows(2) {
+                    painter.line_segment(
+                        [view_ro.to_screen(seg[0], screen), view_ro.to_screen(seg[1], screen)],
+                        Stroke::new(w, Color32::from_rgba_unmultiplied(230, 120, 230, 40)),
+                    );
+                }
+            }
+        }
+
         // ratsnest of unrouted nets (thin gray lines between unconnected pins)
         if self.show_ratsnest {
             if let Some(rep) = &self.last_report {
@@ -445,6 +489,44 @@ impl App {
             if Some(hp) != self.selected {
                 Self::stroke_pick(&painter, board, &view_ro, screen, hp,
                     Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 160)));
+            }
+        }
+
+        // Manual-route guidance: highlight the active net's pads and show a direction
+        // indicator from the route start to the NEAREST same-net pad (the likely next
+        // target), so the user knows where to route. Active net = highlighted net (or 0).
+        if self.route_mode {
+            let active_net = self.highlight_net.unwrap_or(0);
+            // ring every pad of the active net in a bright accent.
+            for pin in &board.pins {
+                if pin.net == Some(active_net) {
+                    painter.circle_stroke(
+                        view_ro.to_screen(pin.location, screen), 6.0,
+                        Stroke::new(1.5, Color32::from_rgb(255, 230, 120)),
+                    );
+                }
+            }
+            // direction to the nearest active-net pad from the route start (or cursor).
+            if let Some(router) = self.router.as_ref() {
+                let from = router.start_point().map(|(p, _)| p).or(cursor_board);
+                if let Some(from) = from {
+                    let nearest = board
+                        .pins
+                        .iter()
+                        .filter(|p| p.net == Some(active_net) && p.location != from)
+                        .min_by_key(|p| from.distance_square(p.location));
+                    if let Some(t) = nearest {
+                        let a = view_ro.to_screen(from, screen);
+                        let b = view_ro.to_screen(t.location, screen);
+                        // dashed guide line + arrowhead toward the target.
+                        painter.add(egui::Shape::dashed_line(
+                            &[a, b],
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 230, 120, 140)),
+                            6.0, 4.0,
+                        ));
+                        draw_arrowhead(&painter, a, b, Color32::from_rgb(255, 230, 120));
+                    }
+                }
             }
         }
 
@@ -775,6 +857,7 @@ impl eframe::App for App {
                     ui.checkbox(&mut self.show_ratsnest, "Ratsnest (unrouted)");
                     ui.checkbox(&mut self.show_pads, "Pads");
                     ui.checkbox(&mut self.fade_inactive, "Fade inactive layers");
+                    ui.checkbox(&mut self.show_clearance, "Clearance halos (always)");
                     if self.highlight_net.is_some() && ui.button("Clear highlight").clicked() {
                         self.highlight_net = None;
                     }
@@ -899,6 +982,22 @@ impl eframe::App for App {
 
         self.file_browser(ctx);
     }
+}
+
+/// Draw a small arrowhead at `b` pointing along a->b.
+fn draw_arrowhead(painter: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
+    let dir = b - a;
+    let len = dir.length();
+    if len < 1.0 {
+        return;
+    }
+    let u = dir / len;
+    let perp = egui::vec2(-u.y, u.x);
+    let size = 8.0;
+    let tip = b;
+    let left = b - u * size + perp * (size * 0.5);
+    let right = b - u * size - perp * (size * 0.5);
+    painter.add(egui::Shape::convex_polygon(vec![tip, left, right], color, Stroke::NONE));
 }
 
 /// The representative layer to color a pad by: the active layer if the pin's padstack
