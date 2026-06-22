@@ -27,12 +27,23 @@ pub struct PathPoint {
     pub layer: usize,
 }
 
-/// Parameters for a maze search (single net, single layer for stage 3/4).
+/// Parameters for a maze search (single net; multi-layer with vias).
 #[derive(Clone, Copy, Debug)]
 pub struct MazeParams {
     pub net: u32,
-    /// The layer the search runs on (rooms, doors and clearance are all on this layer).
+    /// The layer the search STARTS on (the start pin's layer).
     pub layer: usize,
+    /// The layer the GOAL is on. If different from `layer`, a via is required. When
+    /// `allow_vias` is true the search may also change layers mid-route to detour.
+    pub goal_layer: usize,
+    /// Total layer count (vias span all layers, like the engine's through-via default).
+    pub layers: usize,
+    /// Whether the search may place vias to change layers.
+    pub allow_vias: bool,
+    /// Cost added for a via (board units), to bias toward fewer layer changes.
+    pub via_cost: i64,
+    /// Via copper radius (board units), for via clearance checks.
+    pub via_radius: i64,
     pub clearance: i64,
     pub half_width: i64,
     pub bound: IntBox,
@@ -121,15 +132,15 @@ pub fn find_path(
     goal: Point,
     p: &MazeParams,
 ) -> Option<Vec<PathPoint>> {
-    let start_layer = p.layer; // single-layer search on the requested layer
+    let start_layer = p.layer;
     // seed the first room at the start point (grown within a local window for speed)
     let start_room = complete_room(
         index, start_layer, start, p.net, p.clearance, p.half_width, p.room_bound(start),
     )?;
     let mut nodes: Vec<Node> = vec![Node { point: start, layer: start_layer, parent: u32::MAX }];
-    // if the start room already contains the goal and the direct segment is clear, the
-    // path is a single straight segment.
-    if start_room.contains(goal)
+    // single straight segment if start & goal are on the same layer in the same room.
+    if start_layer == p.goal_layer
+        && start_room.contains(goal)
         && index.segment_is_clear(start_layer, start, goal, p.half_width, p.net, p.clearance)
     {
         return Some(vec![
@@ -145,8 +156,9 @@ pub fn find_path(
 
     let mut heap = BinaryHeap::new();
     enqueue_room_doors(
-        index, &start_room, start, 0, 0, goal, p, &mut heap, &mut nodes, &visited,
+        index, &start_room, start, start_layer, 0, 0, goal, p, &mut heap, &nodes, &visited,
     );
+    enqueue_vias(index, start, start_layer, 0, 0, goal, p, &mut heap, &visited);
 
     let mut expansions = 0usize;
     while let Some(fr) = heap.pop() {
@@ -167,7 +179,8 @@ pub fn find_path(
         let node_id = nodes.len() as u32;
         nodes.push(Node { point: fr.entry, layer: fr.layer, parent: fr.parent });
 
-        if room.contains(goal)
+        if fr.layer == p.goal_layer
+            && room.contains(goal)
             && index.segment_is_clear(fr.layer, fr.entry, goal, p.half_width, p.net, p.clearance)
         {
             // reached: backtrace points then append goal (final hop validated clear)
@@ -176,10 +189,64 @@ pub fn find_path(
             return Some(path);
         }
         enqueue_room_doors(
-            index, &room, fr.entry, fr.g, node_id, goal, p, &mut heap, &mut nodes, &visited,
+            index, &room, fr.entry, fr.layer, fr.g, node_id, goal, p, &mut heap, &nodes, &visited,
         );
+        // vias: change layer at this room's entry point (a via sits at fr.entry).
+        enqueue_vias(index, fr.entry, fr.layer, fr.g, node_id, goal, p, &mut heap, &visited);
     }
     None
+}
+
+/// Enqueue via transitions from `(at, layer)` to every other layer, if vias are allowed,
+/// the via fits clear at `at`, and a free room exists on the target layer at `at`. The via
+/// is a frontier element seeded at the SAME point on the target layer (entry == at), so
+/// the backtrace records a stacked point (same x,y, different layer) = a via.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_vias(
+    index: &ObstacleIndex,
+    at: Point,
+    layer: usize,
+    g: i64,
+    parent: u32,
+    goal: Point,
+    p: &MazeParams,
+    heap: &mut BinaryHeap<Frontier>,
+    visited: &HashSet<(usize, i64, i64)>,
+) {
+    if !p.allow_vias {
+        return;
+    }
+    let cell = p.dedup_cell.max(1);
+    let key = |layer: usize, pt: Point| (layer, pt.x.div_euclid(cell), pt.y.div_euclid(cell));
+    for tl in 0..p.layers {
+        if tl == layer {
+            continue;
+        }
+        if visited.contains(&key(tl, at)) {
+            continue;
+        }
+        // the via pad (a disc of via_radius) must clear different-net copper on BOTH the
+        // current and target layers (a through via spans all layers; check both endpoints).
+        let via_clear = |l: usize| {
+            index
+                .min_clearance_margin_within(l, at, at, p.via_radius, p.net, p.clearance.max(1))
+                .map(|gap| gap >= p.clearance as f64)
+                .unwrap_or(true)
+        };
+        if !via_clear(layer) || !via_clear(tl) {
+            continue;
+        }
+        let g2 = g + p.via_cost;
+        let h = dist(at, goal);
+        heap.push(Frontier {
+            f: g2 + h,
+            g: g2,
+            entry: at,
+            seed: at,
+            layer: tl,
+            parent,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,15 +254,15 @@ fn enqueue_room_doors(
     index: &ObstacleIndex,
     room: &Room,
     entry: Point,
+    _layer: usize,
     g: i64,
     parent: u32,
     goal: Point,
     p: &MazeParams,
     heap: &mut BinaryHeap<Frontier>,
-    nodes: &mut [Node],
+    _nodes: &[Node],
     visited: &HashSet<(usize, i64, i64)>,
 ) {
-    let _ = nodes;
     let cell = p.dedup_cell.max(1);
     let key = |layer: usize, pt: Point| (layer, pt.x.div_euclid(cell), pt.y.div_euclid(cell));
     for door in room.doors(index, p.net, p.clearance, p.half_width, p.bound, p.step) {
@@ -294,6 +361,11 @@ mod tests {
         MazeParams {
             net: 0,
             layer: 0,
+            goal_layer: 0,
+            layers: 1,
+            allow_vias: false,
+            via_cost: 0,
+            via_radius: 0,
             clearance: 0,
             half_width: 10,
             bound,
@@ -337,6 +409,47 @@ mod tests {
         }
         // and it must bend (more than just start+goal)
         assert!(path.len() >= 2);
+    }
+
+    #[test]
+    fn via_changes_layer_to_reach_goal_on_another_layer() {
+        // start on layer 0, goal on layer 1; both points in open space on their layer.
+        // The only way to connect is a via.
+        let mut index = ObstacleIndex::new(2);
+        index.build();
+        let bound = IntBox::new(0, 0, 10_000, 10_000);
+        let mut pr = params(bound);
+        pr.layers = 2;
+        pr.goal_layer = 1;
+        pr.allow_vias = true;
+        pr.via_cost = 100;
+        pr.via_radius = 30;
+        let path = find_path(&index, Point::new(2000, 2000), Point::new(8000, 8000), &pr)
+            .expect("via path across layers");
+        assert_eq!(path.first().unwrap().layer, 0);
+        assert_eq!(path.last().unwrap().layer, 1);
+        // there must be a layer change somewhere (a via)
+        let has_via = path.windows(2).any(|w| w[0].layer != w[1].layer);
+        assert!(has_via, "path must include a via to change layers: {path:?}");
+        // the via is a stacked point: same x,y across the layer change
+        for w in path.windows(2) {
+            if w[0].layer != w[1].layer {
+                assert_eq!(w[0].point, w[1].point, "a via is a stacked point");
+            }
+        }
+    }
+
+    #[test]
+    fn no_via_path_when_vias_disallowed_and_goal_on_other_layer() {
+        let mut index = ObstacleIndex::new(2);
+        index.build();
+        let bound = IntBox::new(0, 0, 10_000, 10_000);
+        let mut pr = params(bound);
+        pr.layers = 2;
+        pr.goal_layer = 1;
+        pr.allow_vias = false; // cannot change layer
+        let path = find_path(&index, Point::new(2000, 2000), Point::new(8000, 8000), &pr);
+        assert!(path.is_none(), "goal on another layer is unreachable without vias");
     }
 
     #[test]

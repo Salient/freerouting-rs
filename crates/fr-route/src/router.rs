@@ -39,56 +39,125 @@ pub fn route_connection(
     Some(path_to_geometry(board, grid, net, &path, width, via_padstack))
 }
 
-/// Route a two-pin connection of `net` from `start_pt` to `goal_pt` on a single layer
-/// using the free-angle room/door model (maze search + any-angle backtrace). Returns the
-/// produced trace, or None if no clear path was found. This is the any-angle alternative
-/// to the grid `route_connection`; vias / multi-layer come in a later stage.
+/// Options for a room/door connection route.
+#[derive(Clone, Copy, Debug)]
+pub struct RoomDoorOptions {
+    pub width: i64,
+    pub clearance: i64,
+    pub bound: fr_geometry::IntBox,
+    pub max_rooms: usize,
+    pub angle: crate::locate::AngleRestriction,
+    /// Layer count (for via spanning). 1 = single-layer (no vias).
+    pub layers: usize,
+    /// Allow the search to place vias to reach the goal layer / detour.
+    pub allow_vias: bool,
+    /// Via copper radius (board units) for via clearance + emitted via geometry.
+    pub via_radius: i64,
+    /// Padstack index to use for emitted vias.
+    pub via_padstack: usize,
+}
+
+/// Route a two-pin connection of `net` from `start_pt` (on `start_layer`) to `goal_pt`
+/// (on `goal_layer`) using the free-angle room/door model (maze search + any-angle
+/// backtrace, with vias for layer changes). Returns the produced traces (one per layer
+/// run) + vias (at layer changes), or None if no clear path was found.
 #[allow(clippy::too_many_arguments)]
 pub fn route_connection_roomdoor(
     index: &fr_spatial::ObstacleIndex,
-    layer: usize,
+    start_layer: usize,
+    goal_layer: usize,
     net: u32,
     start_pt: Point,
     goal_pt: Point,
-    width: i64,
-    clearance: i64,
-    bound: fr_geometry::IntBox,
-    max_rooms: usize,
-    angle: crate::locate::AngleRestriction,
+    opts: &RoomDoorOptions,
 ) -> Option<RoutedConnection> {
-    let half = width / 2;
-    let step = (width + clearance).max(1);
+    let half = opts.width / 2;
+    let step = (opts.width + opts.clearance).max(1);
     // Local room window: large enough to detour generously around obstacles between the
-    // pins, but far smaller than the whole board so obstacle queries stay cheap. Scale to
-    // the start-goal span (plus a fixed pad for short connections).
+    // pins, but far smaller than the whole board so obstacle queries stay cheap.
     let span = (((goal_pt.x - start_pt.x) as f64).powi(2)
         + ((goal_pt.y - start_pt.y) as f64).powi(2))
     .sqrt() as i64;
     let window = (span + 20 * step).max(40 * step);
     let params = crate::maze::MazeParams {
         net,
-        layer,
-        clearance,
+        layer: start_layer,
+        goal_layer,
+        layers: opts.layers.max(1),
+        allow_vias: opts.allow_vias && opts.layers > 1,
+        via_cost: (span / 4).max(8 * step), // a via should cost like a modest detour
+        via_radius: opts.via_radius,
+        clearance: opts.clearance,
         half_width: half,
-        bound,
+        bound: opts.bound,
         step,
         dedup_cell: step,
-        max_rooms,
+        max_rooms: opts.max_rooms,
         window,
     };
     let path = crate::maze::find_path(index, start_pt, goal_pt, &params)?;
-    let corners = crate::locate::straighten_angled(index, &path, net, half, clearance, angle)?;
-    if corners.len() < 2 {
+    geometry_from_path(index, &path, net, opts, half)
+}
+
+/// Split a (possibly multi-layer) maze path into per-layer runs, straighten each run, and
+/// emit a Trace per run + a Via at each layer change (a via is a stacked PathPoint: same
+/// x,y, different layer between consecutive points).
+fn geometry_from_path(
+    index: &fr_spatial::ObstacleIndex,
+    path: &[crate::maze::PathPoint],
+    net: u32,
+    opts: &RoomDoorOptions,
+    half: i64,
+) -> Option<RoutedConnection> {
+    use crate::maze::PathPoint;
+    if path.len() < 2 {
         return None;
     }
     let mut out = RoutedConnection::default();
-    out.traces.push(Trace {
-        layer,
-        width,
-        corners,
-        net: Some(net as usize),
-        fixed: FixedState::Route,
-    });
+    // group consecutive points by layer; a layer change at the same point is a via.
+    let mut run: Vec<PathPoint> = vec![path[0]];
+    let flush = |run: &[PathPoint], out: &mut RoutedConnection| -> bool {
+        if run.len() < 2 {
+            return true; // a single point on a layer (pure via transit) -> no trace
+        }
+        match crate::locate::straighten_angled(index, run, net, half, opts.clearance, opts.angle) {
+            Some(corners) if corners.len() >= 2 => {
+                out.traces.push(Trace {
+                    layer: run[0].layer,
+                    width: opts.width,
+                    corners,
+                    net: Some(net as usize),
+                    fixed: FixedState::Route,
+                });
+                true
+            }
+            _ => false,
+        }
+    };
+    for w in path.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a.layer != b.layer {
+            // via at point a (== b in x,y). close the current run, emit the via.
+            if !flush(&run, &mut out) {
+                return None;
+            }
+            out.vias.push(Via {
+                padstack: opts.via_padstack,
+                location: a.point,
+                net: Some(net as usize),
+                fixed: FixedState::Route,
+            });
+            run = vec![b];
+        } else {
+            run.push(b);
+        }
+    }
+    if !flush(&run, &mut out) {
+        return None;
+    }
+    if out.traces.is_empty() && out.vias.is_empty() {
+        return None;
+    }
     Some(out)
 }
 

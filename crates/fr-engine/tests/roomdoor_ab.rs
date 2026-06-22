@@ -9,7 +9,7 @@
 use fr_dsn::read_board;
 use fr_engine::{build_obstacle_index, net_pin_points};
 use fr_geometry::{IntBox, Point};
-use fr_route::route_connection_roomdoor;
+use fr_route::{route_connection_roomdoor, AngleRestriction, RoomDoorOptions};
 
 const REAL: &str = include_str!("../../fr-dsn/tests/fixtures/altium_board.dsn");
 
@@ -62,9 +62,19 @@ fn roomdoor_routes_real_two_pin_nets_cleanly() {
             break; // keep the test fast; a representative sample
         }
         let straight = poly_len(&[a, b]);
+        let opts = RoomDoorOptions {
+            width,
+            clearance,
+            bound,
+            max_rooms: 4000,
+            angle: AngleRestriction::None,
+            layers: 1,
+            allow_vias: false,
+            via_radius: 0,
+            via_padstack: 0,
+        };
         if let Some(conn) = route_connection_roomdoor(
-            &index, la, net_id as u32, a, b, width, clearance, bound, 4000,
-            fr_route::AngleRestriction::None,
+            &index, la, lb, net_id as u32, a, b, &opts,
         ) {
             routed += 1;
             let t = &conn.traces[0];

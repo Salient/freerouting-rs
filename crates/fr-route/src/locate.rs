@@ -294,7 +294,8 @@ mod tests {
         index.build();
         let bound = IntBox::new(0, 0, 10_000, 10_000);
         let params = MazeParams {
-            net: 0, layer: 0, clearance: 0, half_width: 10, bound,
+            net: 0, layer: 0, goal_layer: 0, layers: 1, allow_vias: false,
+            via_cost: 0, via_radius: 0, clearance: 0, half_width: 10, bound,
             step: 40, dedup_cell: 40, max_rooms: 5000, window: 0,
         };
         let path = find_path(&index, Point::new(1000, 5000), Point::new(9000, 5000), &params)
