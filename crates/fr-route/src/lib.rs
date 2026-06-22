@@ -8,6 +8,7 @@
 pub mod astar;
 pub mod grid;
 pub mod obstacles;
+pub mod room;
 pub mod router;
 
 pub use astar::{Costs, EdgeValidator};

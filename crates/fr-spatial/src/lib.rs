@@ -68,6 +68,39 @@ impl RTreeObject for Obstacle {
 /// No specific owner (board edge, multi-net junction). Different from every real net id.
 pub const NO_NET: u32 = u32::MAX;
 
+/// A read-only view of one indexed obstacle's copper geometry and owning net, returned by
+/// spatial queries. Coordinates are absolute board units; the half-extent (disc radius /
+/// segment half-width) is the copper, before any clearance is applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ObstacleShape {
+    /// Circular pad/via copper.
+    Disc { center: Point, radius: i64 },
+    /// Trace-segment copper with half-width.
+    Seg { a: Point, b: Point, half: i64 },
+}
+
+impl ObstacleShape {
+    /// Minimum distance from this copper's centerline/center to point `p` (board units),
+    /// i.e. distance to the copper EDGE is this minus the half-extent.
+    pub fn center_dist_to_point(&self, p: Point) -> f64 {
+        match *self {
+            ObstacleShape::Disc { center, .. } => {
+                let dx = (p.x - center.x) as f64;
+                let dy = (p.y - center.y) as f64;
+                (dx * dx + dy * dy).sqrt()
+            }
+            ObstacleShape::Seg { a, b, .. } => point_seg_dist(p, a, b),
+        }
+    }
+    /// The copper half-extent (disc radius / segment half-width).
+    pub fn half_extent(&self) -> i64 {
+        match *self {
+            ObstacleShape::Disc { radius, .. } => radius,
+            ObstacleShape::Seg { half, .. } => half,
+        }
+    }
+}
+
 /// Per-layer exact obstacle index. A via spans layers, so it is inserted on every layer
 /// its padstack covers. Built once, then queried (and optionally appended to) as routing
 /// progresses.
@@ -216,6 +249,43 @@ impl ObstacleIndex {
             best = Some(best.map_or(margin, |m: f64| m.min(margin)));
         }
         best
+    }
+
+    /// All obstacles on `layer` whose copper bbox intersects `query_box`, excluding those
+    /// owned by `net` (same-net copper is not an obstacle to itself), as read-only
+    /// `(shape, owner_net)` pairs. Used by the room/door model to carve a free-space room
+    /// around a seed point. Results are sorted by owner net then geometry for determinism.
+    pub fn query_box(&self, layer: usize, query_box: IntBox, net: u32) -> Vec<(ObstacleShape, u32)> {
+        if !self.built || layer >= self.trees.len() {
+            return Vec::new();
+        }
+        let query = aabb_of(query_box);
+        let mut out: Vec<(ObstacleShape, u32)> = Vec::new();
+        for obs in self.trees[layer].locate_in_envelope_intersecting(&query) {
+            if obs.net == net && net != NO_NET {
+                continue;
+            }
+            let shape = match obs.shape {
+                Shape::Disc { center, radius } => ObstacleShape::Disc { center, radius },
+                Shape::Seg { a, b, half } => ObstacleShape::Seg { a, b, half },
+            };
+            out.push((shape, obs.net));
+        }
+        // deterministic order independent of R-tree internal layout
+        out.sort_by(|x, y| {
+            x.1.cmp(&y.1).then_with(|| {
+                shape_key(&x.0).partial_cmp(&shape_key(&y.0)).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        out
+    }
+}
+
+/// A total-ish ordering key for deterministic sorting of obstacle shapes.
+fn shape_key(s: &ObstacleShape) -> (i64, i64, i64, i64, i64) {
+    match *s {
+        ObstacleShape::Disc { center, radius } => (0, center.x, center.y, radius, 0),
+        ObstacleShape::Seg { a, b, half } => (1, a.x, a.y, b.x, b.y.wrapping_add(half)),
     }
 }
 
