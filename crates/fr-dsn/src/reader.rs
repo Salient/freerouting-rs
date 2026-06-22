@@ -196,14 +196,37 @@ fn read_rules(structure: &Sexp, base: &Rules, res: Resolution, _warnings: &mut [
 }
 
 fn read_outline(structure: &Sexp, res: Resolution) -> Vec<Point> {
-    // Boundary may be a (rect pcb ...) or (path pcb/signal w x y ...). Take the first
-    // boundary with usable coordinates.
+    // A board may have several (boundary ...) scopes. A `(path ...)` boundary traces the
+    // TRUE board edge (often a concave polygon, e.g. an L-shaped board), while a
+    // `(rect pcb ...)` boundary is usually just the rectangular sheet/extent that bounds
+    // it. Prefer the most detailed path boundary; fall back to a rect only if no usable
+    // path exists. (Altium exports both; taking the rect drew the wrong, rectangular
+    // shape.)
+    let mut best_path: Vec<Point> = Vec::new();
+    let mut rect_fallback: Vec<Point> = Vec::new();
     for boundary in structure.children("boundary") {
-        if let Some(rect) = boundary.child("rect") {
+        if let Some(path) = boundary.child("path") {
+            // path <layer> <width> x y x y ...
+            let nums: Vec<f64> = path.atom_args().iter().skip(2).filter_map(|s| parse_num(s)).collect();
+            if nums.len() >= 6 {
+                let mut pts: Vec<Point> = nums
+                    .chunks_exact(2)
+                    .map(|c| scale_pt(c[0], c[1], res))
+                    .collect();
+                // a closing repeat of the first vertex is common; drop it.
+                if pts.len() >= 2 && pts.first() == pts.last() {
+                    pts.pop();
+                }
+                // keep the path with the most vertices (the most detailed outline).
+                if pts.len() > best_path.len() {
+                    best_path = pts;
+                }
+            }
+        } else if let Some(rect) = boundary.child("rect") {
             let nums: Vec<f64> = rect.atom_args().iter().skip(1).filter_map(|s| parse_num(s)).collect();
-            if nums.len() >= 4 {
+            if nums.len() >= 4 && rect_fallback.is_empty() {
                 let (x1, y1, x2, y2) = (nums[0], nums[1], nums[2], nums[3]);
-                return vec![
+                rect_fallback = vec![
                     scale_pt(x1, y1, res),
                     scale_pt(x2, y1, res),
                     scale_pt(x2, y2, res),
@@ -211,21 +234,12 @@ fn read_outline(structure: &Sexp, res: Resolution) -> Vec<Point> {
                 ];
             }
         }
-        if let Some(path) = boundary.child("path") {
-            // path <layer> <width> x y x y ...
-            let nums: Vec<f64> = path.atom_args().iter().skip(2).filter_map(|s| parse_num(s)).collect();
-            if nums.len() >= 6 {
-                let mut pts = Vec::new();
-                let mut i = 0;
-                while i + 1 < nums.len() {
-                    pts.push(scale_pt(nums[i], nums[i + 1], res));
-                    i += 2;
-                }
-                return pts;
-            }
-        }
     }
-    Vec::new()
+    if !best_path.is_empty() {
+        best_path
+    } else {
+        rect_fallback
+    }
 }
 
 fn read_padstacks(
