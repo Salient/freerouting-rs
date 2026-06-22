@@ -59,72 +59,230 @@ pub fn route_board(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     let via_padstack = ensure_via_padstack(board);
     let costs = Costs::for_grid(&grid, board.rules.default_clearance.max(grid.pitch) * 4);
 
-    // 3. Route each net's connections in deterministic order. We connect pins in a
-    //    simple chain (pin[0]->pin[1]->...): a minimal spanning approach good enough to
-    //    exercise the pipeline; MST/steiner ordering is a later refinement.
+    // 3. Route nets. Connections within a net follow an MST over its pins. Routing runs
+    //    in parallel by default (one shared obstacle snapshot, deterministic ordered
+    //    commit with conflict repair); threads==1 forces the sequential path.
     let mut report = RouteReport { nets_total: board.nets.len(), passes: 1, ..Default::default() };
-    let net_count = board.nets.len();
     let max_expansions = expansion_budget(&grid);
 
     // Build the obstacle map once over all pins, then refresh it periodically as traces
     // accumulate. Rebuilding per-connection is O(pins x connections) and far too slow on
     // an 800-component board; refreshing every `refresh_every` routed connections keeps
     // newly-added traces blocking subsequent nets without quadratic cost.
-    let mut obs = ObstacleMap::build(board, &grid);
+    let ctx = RouteCtx { grid: &grid, via_padstack, costs, max_expansions,
+                         width: board.rules.default_width.max(grid.pitch / 2) };
+
+    if opts.threads != 1 {
+        route_parallel(board, &ctx, opts, start, budget, &mut report);
+    } else {
+        route_sequential(board, &ctx, start, budget, &mut report);
+    }
+    report
+}
+
+/// Per-run routing context shared across nets (immutable).
+struct RouteCtx<'a> {
+    grid: &'a Grid,
+    via_padstack: usize,
+    costs: Costs,
+    max_expansions: usize,
+    width: i64,
+}
+
+/// Geometry produced for one net (not yet committed to the board).
+struct NetResult {
+    traces: Vec<fr_board::Trace>,
+    vias: Vec<fr_board::Via>,
+    connections_routed: usize,
+    connections_failed: usize,
+    fully_routed: bool,
+}
+
+/// Route a single net's MST edges against an obstacle snapshot. Pure: no board mutation.
+fn route_one_net(
+    board: &Board,
+    obs: &ObstacleMap,
+    ctx: &RouteCtx,
+    net_id: usize,
+) -> Option<NetResult> {
+    let pin_pts = net_pin_points(board, net_id);
+    if pin_pts.len() < 2 {
+        return None; // nothing to connect (caller counts trivially-complete nets)
+    }
+    let mut res = NetResult {
+        traces: Vec::new(), vias: Vec::new(),
+        connections_routed: 0, connections_failed: 0, fully_routed: true,
+    };
+    for (ai, bi) in mst_edges(&pin_pts) {
+        match route_connection(
+            board, ctx.grid, obs, net_id as u32,
+            pin_pts[ai], pin_pts[bi],
+            ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
+        ) {
+            Some(c) => {
+                res.traces.extend(c.traces);
+                res.vias.extend(c.vias);
+                res.connections_routed += 1;
+            }
+            None => {
+                res.connections_failed += 1;
+                res.fully_routed = false;
+            }
+        }
+    }
+    Some(res)
+}
+
+/// Sequential router: route nets in id order, refreshing the obstacle map periodically.
+fn route_sequential(
+    board: &mut Board,
+    ctx: &RouteCtx,
+    start: Instant,
+    budget: Option<Duration>,
+    report: &mut RouteReport,
+) {
+    let net_count = board.nets.len();
+    let mut obs = ObstacleMap::build(board, ctx.grid);
     let refresh_every = 32usize;
     let mut since_refresh = 0usize;
 
     for net_id in 0..net_count {
-        if let Some(b) = budget {
-            if start.elapsed() >= b {
-                break;
-            }
+        if budget.map(|b| start.elapsed() >= b).unwrap_or(false) {
+            break;
         }
-        let pin_pts = net_pin_points(board, net_id);
-        if pin_pts.len() < 2 {
-            if pin_pts.len() <= 1 {
-                report.nets_completed += 1;
+        match route_one_net(board, &obs, ctx, net_id) {
+            None => {
+                report.nets_completed += 1; // 0/1-pin net is trivially complete
             }
-            continue;
-        }
-        let width = board.rules.default_width.max(grid.pitch / 2);
-        let mut all_ok = true;
-        let mut produced = Vec::new();
-        // Connect pins along a minimum spanning tree (shortest total wire, each edge a
-        // short hop) rather than a naive sorted chain - more edges route successfully.
-        for (ai, bi) in mst_edges(&pin_pts) {
-            let conn = route_connection(
-                board, &grid, &obs, net_id as u32,
-                pin_pts[ai], pin_pts[bi],
-                width, Some(via_padstack), &costs, max_expansions,
-            );
-            match conn {
-                Some(c) => {
-                    produced.push(c);
-                    report.connections_routed += 1;
+            Some(r) => {
+                report.connections_routed += r.connections_routed;
+                report.connections_failed += r.connections_failed;
+                if r.fully_routed {
+                    report.nets_completed += 1;
                 }
-                None => {
-                    report.connections_failed += 1;
-                    all_ok = false;
+                let added = r.traces.len() + r.vias.len();
+                board.traces.extend(r.traces);
+                board.vias.extend(r.vias);
+                since_refresh += added;
+                if since_refresh >= refresh_every {
+                    obs = ObstacleMap::build(board, ctx.grid);
+                    since_refresh = 0;
                 }
             }
         }
-        // commit this net's geometry
-        for c in produced {
-            board.traces.extend(c.traces);
-            board.vias.extend(c.vias);
-            since_refresh += 1;
-        }
-        if all_ok {
-            report.nets_completed += 1;
-        }
-        if since_refresh >= refresh_every {
-            obs = ObstacleMap::build(board, &grid);
-            since_refresh = 0;
+    }
+}
+
+/// Parallel router (Phase 8). Routes nets concurrently against a shared immutable
+/// obstacle snapshot via rayon, then commits results in deterministic net-id order,
+/// detecting conflicts where a later net's geometry overlaps an already-committed net.
+/// Conflicting nets are re-routed sequentially in a second pass against the updated
+/// board. Determinism: results are gathered into net-id order before committing, and
+/// the conflict pass is sequential, so output is independent of thread scheduling.
+fn route_parallel(
+    board: &mut Board,
+    ctx: &RouteCtx,
+    opts: &RouteOptions,
+    start: Instant,
+    budget: Option<Duration>,
+    report: &mut RouteReport,
+) {
+    use rayon::prelude::*;
+
+    let net_count = board.nets.len();
+    let pool = build_pool(opts.threads);
+
+    // Phase A: route every net in parallel against one shared snapshot.
+    let snapshot = ObstacleMap::build(board, ctx.grid);
+    let results: Vec<(usize, Option<NetResult>)> = pool.install(|| {
+        (0..net_count)
+            .into_par_iter()
+            .map(|net_id| (net_id, route_one_net(board, &snapshot, ctx, net_id)))
+            .collect()
+    });
+
+    // Phase B: deterministic commit in net-id order with conflict detection. Because all
+    // nets saw the same snapshot, two nets may claim overlapping cells; the first (lower
+    // id) wins, later conflicters are deferred to the sequential repair pass.
+    let mut occupied: std::collections::HashSet<(u32, i32, i32)> = std::collections::HashSet::new();
+    let mut deferred: Vec<usize> = Vec::new();
+
+    for (net_id, maybe) in results {
+        match maybe {
+            None => report.nets_completed += 1,
+            Some(r) => {
+                if conflicts(&r, ctx, &occupied) {
+                    deferred.push(net_id);
+                } else {
+                    mark_occupied(&r, ctx, &mut occupied);
+                    report.connections_routed += r.connections_routed;
+                    report.connections_failed += r.connections_failed;
+                    if r.fully_routed {
+                        report.nets_completed += 1;
+                    }
+                    board.traces.extend(r.traces);
+                    board.vias.extend(r.vias);
+                }
+            }
         }
     }
 
-    report
+    // Phase C: sequential repair of conflicting nets against the now-populated board.
+    let mut obs = ObstacleMap::build(board, ctx.grid);
+    let mut since_refresh = 0usize;
+    for net_id in deferred {
+        if budget.map(|b| start.elapsed() >= b).unwrap_or(false) {
+            break;
+        }
+        if let Some(r) = route_one_net(board, &obs, ctx, net_id) {
+            report.connections_routed += r.connections_routed;
+            report.connections_failed += r.connections_failed;
+            if r.fully_routed {
+                report.nets_completed += 1;
+            }
+            since_refresh += r.traces.len() + r.vias.len();
+            board.traces.extend(r.traces);
+            board.vias.extend(r.vias);
+            if since_refresh >= 32 {
+                obs = ObstacleMap::build(board, ctx.grid);
+                since_refresh = 0;
+            }
+        }
+    }
+}
+
+fn build_pool(threads: usize) -> rayon::ThreadPool {
+    let mut b = rayon::ThreadPoolBuilder::new();
+    if threads > 0 {
+        b = b.num_threads(threads);
+    }
+    b.build().unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap())
+}
+
+/// Grid cells a net result occupies (trace corners + via locations), as (layer,col,row).
+fn result_cells(r: &NetResult, ctx: &RouteCtx) -> Vec<(u32, i32, i32)> {
+    let mut cells = Vec::new();
+    for t in &r.traces {
+        for p in &t.corners {
+            let n = ctx.grid.node_at(t.layer, *p);
+            cells.push((n.layer, n.col, n.row));
+        }
+    }
+    for v in &r.vias {
+        let n = ctx.grid.node_at(0, v.location);
+        cells.push((n.layer, n.col, n.row));
+    }
+    cells
+}
+
+fn conflicts(r: &NetResult, ctx: &RouteCtx, occupied: &std::collections::HashSet<(u32, i32, i32)>) -> bool {
+    result_cells(r, ctx).iter().any(|c| occupied.contains(c))
+}
+
+fn mark_occupied(r: &NetResult, ctx: &RouteCtx, occupied: &mut std::collections::HashSet<(u32, i32, i32)>) {
+    for c in result_cells(r, ctx) {
+        occupied.insert(c);
+    }
 }
 
 /// Build board.pins from net pin-references if the board has none yet. We can only place
@@ -297,6 +455,26 @@ mod tests {
         // total squared length should be 3 * 100 = 300 (adjacent hops), not more
         let total: i128 = edges.iter().map(|&(a, b)| pts[a].distance_square(pts[b])).sum();
         assert_eq!(total, 300);
+    }
+
+    #[test]
+    fn parallel_routes_the_two_pin_net() {
+        let mut b = two_pin_board();
+        let report = route_board(&mut b, &RouteOptions { max_time_secs: 0, threads: 0, seed: 1 });
+        assert_eq!(report.nets_completed, 1, "parallel path should connect the net");
+        assert!(!b.traces.is_empty());
+    }
+
+    #[test]
+    fn parallel_is_deterministic() {
+        let mut b1 = two_pin_board();
+        let mut b2 = two_pin_board();
+        route_board(&mut b1, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1 });
+        route_board(&mut b2, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1 });
+        assert_eq!(b1.traces.len(), b2.traces.len());
+        if let (Some(t1), Some(t2)) = (b1.traces.first(), b2.traces.first()) {
+            assert_eq!(t1.corners, t2.corners, "parallel routing must be deterministic");
+        }
     }
 
     #[test]

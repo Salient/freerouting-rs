@@ -7,3 +7,4 @@ Cargo.lock.bak
 # fr-gui builds standalone (excluded from workspace) -> its own target/
 crates/fr-gui/target
 crates/fr-gui/Cargo.lock
+/target/criterion

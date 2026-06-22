@@ -12,3 +12,8 @@ rayon.workspace = true
 
 [dev-dependencies]
 fr-dsn.workspace = true
+criterion = "0.5"
+
+[[bench]]
+name = "route_bench"
+harness = false
