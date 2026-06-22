@@ -13,6 +13,9 @@ fr-geometry = { path = "../fr-geometry" }
 fr-board = { path = "../fr-board" }
 fr-dsn = { path = "../fr-dsn" }
 fr-engine = { path = "../fr-engine" }
-eframe = "0.29"
+# Use the wgpu backend (not the default glow/OpenGL): WSLg's GL stack fails to provide
+# a GL driver/config (ZINK pdev / NoGlutinConfigs), but wgpu can fall back to Vulkan or
+# software (lavapipe). default-features=false drops the glow default.
+eframe = { version = "0.29", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 egui = "0.29"
 rfd = "0.15"
