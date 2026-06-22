@@ -90,10 +90,12 @@ pub fn route_board(board: &mut Board, opts: &RouteOptions) -> RouteReport {
         let width = board.rules.default_width.max(grid.pitch / 2);
         let mut all_ok = true;
         let mut produced = Vec::new();
-        for i in 0..pin_pts.len() - 1 {
+        // Connect pins along a minimum spanning tree (shortest total wire, each edge a
+        // short hop) rather than a naive sorted chain - more edges route successfully.
+        for (ai, bi) in mst_edges(&pin_pts) {
             let conn = route_connection(
                 board, &grid, &obs, net_id as u32,
-                pin_pts[i], pin_pts[i + 1],
+                pin_pts[ai], pin_pts[bi],
                 width, Some(via_padstack), &costs, max_expansions,
             );
             match conn {
@@ -167,6 +169,52 @@ fn ensure_pins(board: &mut Board) {
     board.pins = new_pins;
 }
 
+/// Minimum spanning tree edges (Prim's, O(n^2)) over the points, returned as index
+/// pairs (a, b). Edge weight is squared Euclidean distance (monotonic, exact). For n<=1
+/// returns no edges. n is small per net (typically < 50), so O(n^2) is ample.
+fn mst_edges(pts: &[Point]) -> Vec<(usize, usize)> {
+    let n = pts.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let mut in_tree = vec![false; n];
+    let mut best_cost = vec![i128::MAX; n];
+    let mut best_from = vec![usize::MAX; n];
+    let mut edges = Vec::with_capacity(n - 1);
+    in_tree[0] = true;
+    for j in 1..n {
+        best_cost[j] = pts[0].distance_square(pts[j]);
+        best_from[j] = 0;
+    }
+    for _ in 1..n {
+        // pick the cheapest non-tree vertex
+        let mut u = usize::MAX;
+        let mut ucost = i128::MAX;
+        for j in 0..n {
+            if !in_tree[j] && best_cost[j] < ucost {
+                ucost = best_cost[j];
+                u = j;
+            }
+        }
+        if u == usize::MAX {
+            break;
+        }
+        in_tree[u] = true;
+        edges.push((best_from[u], u));
+        // relax
+        for j in 0..n {
+            if !in_tree[j] {
+                let d = pts[u].distance_square(pts[j]);
+                if d < best_cost[j] {
+                    best_cost[j] = d;
+                    best_from[j] = u;
+                }
+            }
+        }
+    }
+    edges
+}
+
 /// Distinct routable pin points of a net (dedup identical component locations).
 fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
     let mut pts: Vec<Point> = board.pins_of_net(net_id).map(|p| p.location).collect();
@@ -236,6 +284,26 @@ mod tests {
         assert_eq!(report.nets_completed, 1, "the single net should connect");
         assert!(report.connections_routed >= 1);
         assert!(!b.traces.is_empty(), "should have produced traces");
+    }
+
+    #[test]
+    fn mst_connects_all_pins_minimally() {
+        // 4 points in a line: MST should be the 3 adjacent edges (not the long diagonals).
+        let pts = vec![
+            Point::new(0, 0), Point::new(10, 0), Point::new(20, 0), Point::new(30, 0),
+        ];
+        let edges = mst_edges(&pts);
+        assert_eq!(edges.len(), 3, "n-1 edges for n=4");
+        // total squared length should be 3 * 100 = 300 (adjacent hops), not more
+        let total: i128 = edges.iter().map(|&(a, b)| pts[a].distance_square(pts[b])).sum();
+        assert_eq!(total, 300);
+    }
+
+    #[test]
+    fn mst_trivial_sizes() {
+        assert!(mst_edges(&[]).is_empty());
+        assert!(mst_edges(&[Point::new(1, 1)]).is_empty());
+        assert_eq!(mst_edges(&[Point::new(0, 0), Point::new(5, 0)]).len(), 1);
     }
 
     #[test]
