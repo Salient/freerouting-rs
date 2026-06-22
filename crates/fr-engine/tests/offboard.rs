@@ -6,7 +6,7 @@ const REAL: &str = include_str!("../../fr-dsn/tests/fixtures/altium_board.dsn");
 #[test]
 fn no_routes_outside_outline() {
     let (mut board,_w)=read_board(REAL);
-    route_board(&mut board, &RouteOptions{max_time_secs:0,threads:1,seed:1});
+    route_board(&mut board, &RouteOptions{max_time_secs:0,threads:1,seed:1,..Default::default()});
     let outline=board.outline.clone();
     let mut outside=0; let mut total=0;
     for t in &board.traces {

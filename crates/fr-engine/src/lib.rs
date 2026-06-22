@@ -18,22 +18,30 @@ pub struct RouteOptions {
     pub threads: usize,
     /// Deterministic seed.
     pub seed: u64,
+    /// Override trace width in board units (0 = use the board's rule width).
+    pub width: i64,
+    /// Override clearance in board units (0 = use the board's rule clearance).
+    pub clearance: i64,
+    /// Max signal layers to route on (0 = all).
+    pub max_layers: usize,
 }
 
 impl Default for RouteOptions {
     fn default() -> Self {
-        RouteOptions { max_time_secs: 0, threads: 0, seed: 1 }
+        RouteOptions { max_time_secs: 0, threads: 0, seed: 1, width: 0, clearance: 0, max_layers: 0 }
     }
 }
 
 /// Summary of a routing run.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RouteReport {
     pub nets_total: usize,
     pub nets_completed: usize,
     pub connections_routed: usize,
     pub connections_failed: usize,
     pub passes: usize,
+    /// Net ids that did not fully route (for ratsnest / incompletes display).
+    pub unrouted_nets: Vec<usize>,
 }
 
 /// Route every net on the board. Mutates `board.traces` / `board.vias`.
@@ -52,10 +60,19 @@ pub fn route_board(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     }) else {
         return RouteReport { nets_total: board.nets.len(), ..Default::default() };
     };
+    // Apply option overrides to the board rules (width/clearance) before sizing the grid.
+    if opts.width > 0 {
+        board.rules.default_width = opts.width;
+    }
+    if opts.clearance > 0 {
+        board.rules.default_clearance = opts.clearance;
+        board.rules.edge_clearance = opts.clearance;
+    }
     let pitch = choose_pitch(board, bounds);
     // Cap layers used for search to keep the node count and via fan-out modest; the grid
     // router uses all signal layers but very deep stacks blow up the closed set.
-    let grid = Grid::new(bounds, pitch, board.layer_count().max(1).min(6));
+    let layer_cap = if opts.max_layers > 0 { opts.max_layers } else { 6 };
+    let grid = Grid::new(bounds, pitch, board.layer_count().max(1).min(layer_cap));
     let via_padstack = ensure_via_padstack(board);
     let costs = Costs::for_grid(&grid, board.rules.default_clearance.max(grid.pitch) * 4);
 
@@ -330,6 +347,7 @@ fn route_incremental(
 
     report.nets_completed = completed.iter().filter(|c| **c).count();
     report.passes = MAX_PASSES;
+    report.unrouted_nets = (0..net_count).filter(|&i| !completed[i]).collect();
 }
 
 /// Build board.pins from net pin-references if the board has none yet. We can only place
@@ -421,6 +439,13 @@ fn mst_edges(pts: &[Point]) -> Vec<(usize, usize)> {
 }
 
 /// Distinct routable pin points of a net (dedup identical component locations).
+/// Public: the MST ratsnest edges of a net as point pairs, for GUI display of unrouted
+/// connections. Returns the same edges the router would attempt.
+pub fn net_ratsnest(board: &Board, net_id: usize) -> Vec<(Point, Point)> {
+    let pts = net_pin_points(board, net_id);
+    mst_edges(&pts).into_iter().map(|(a, b)| (pts[a], pts[b])).collect()
+}
+
 fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
     let mut pts: Vec<Point> = board.pins_of_net(net_id).map(|p| p.location).collect();
     pts.sort_by_key(|p| (p.x, p.y));
@@ -557,7 +582,7 @@ mod tests {
     #[test]
     fn parallel_routes_the_two_pin_net() {
         let mut b = two_pin_board();
-        let report = route_board(&mut b, &RouteOptions { max_time_secs: 0, threads: 0, seed: 1 });
+        let report = route_board(&mut b, &RouteOptions { max_time_secs: 0, threads: 0, seed: 1, ..Default::default() });
         assert_eq!(report.nets_completed, 1, "parallel path should connect the net");
         assert!(!b.traces.is_empty());
     }
@@ -566,8 +591,8 @@ mod tests {
     fn parallel_is_deterministic() {
         let mut b1 = two_pin_board();
         let mut b2 = two_pin_board();
-        route_board(&mut b1, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1 });
-        route_board(&mut b2, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1 });
+        route_board(&mut b1, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1, ..Default::default() });
+        route_board(&mut b2, &RouteOptions { max_time_secs: 0, threads: 4, seed: 1, ..Default::default() });
         assert_eq!(b1.traces.len(), b2.traces.len());
         if let (Some(t1), Some(t2)) = (b1.traces.first(), b2.traces.first()) {
             assert_eq!(t1.corners, t2.corners, "parallel routing must be deterministic");

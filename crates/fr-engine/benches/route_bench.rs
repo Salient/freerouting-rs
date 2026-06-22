@@ -13,7 +13,7 @@ fn bench_route(c: &mut Criterion) {
     group.bench_function("incremental", |b| {
         b.iter(|| {
             let (mut board, _) = read_board(REAL);
-            let r = route_board(&mut board, &RouteOptions { max_time_secs: 0, threads: 1, seed: 1 });
+            let r = route_board(&mut board, &RouteOptions { max_time_secs: 0, threads: 1, seed: 1, ..Default::default() });
             criterion::black_box(r.nets_completed)
         })
     });

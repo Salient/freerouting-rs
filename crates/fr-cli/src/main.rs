@@ -101,7 +101,10 @@ fn run_route(
         warnings.len()
     );
 
-    let opts = fr_engine::RouteOptions { max_time_secs: max_time, threads, seed };
+    let opts = fr_engine::RouteOptions {
+        max_time_secs: max_time, threads, seed,
+        width: 0, clearance: 0, max_layers: 0,
+    };
     let report = fr_engine::route_board(&mut board, &opts);
     eprintln!(
         "routed: {}/{} nets, {} traces, {} vias in {} passes",

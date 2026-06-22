@@ -18,4 +18,3 @@ fr-engine = { path = "../fr-engine" }
 # software (lavapipe). default-features=false drops the glow default.
 eframe = { version = "0.29", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 egui = "0.29"
-rfd = "0.15"

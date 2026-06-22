@@ -7,7 +7,7 @@ const REAL: &str = include_str!("../../fr-dsn/tests/fixtures/altium_board.dsn");
 #[test]
 fn no_trace_to_trace_shorts() {
     let (mut board, _w) = read_board(REAL);
-    let r = route_board(&mut board, &RouteOptions { max_time_secs: 0, threads: 1, seed: 1 });
+    let r = route_board(&mut board, &RouteOptions { max_time_secs: 0, threads: 1, seed: 1, ..Default::default() });
     let tt = drc_short_count(&board);
     let tp = drc_trace_pin_short_count(&board);
     eprintln!("nets {}/{}, traces {}, vias {} | trace-trace shorts {}, trace-pin shorts {}",
