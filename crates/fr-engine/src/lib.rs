@@ -137,49 +137,86 @@ fn route_incremental(
     report: &mut RouteReport,
 ) {
     let net_count = board.nets.len();
-    // One obstacle map seeded with all pads/pins, mutated as we go.
-    let mut obs = ObstacleMap::build_with_clearance(board, ctx.grid, ctx.clearance);
 
-    for net_id in 0..net_count {
-        if budget.map(|b| start.elapsed() >= b).unwrap_or(false) {
-            break;
-        }
-        let pin_pts = net_pin_points(board, net_id);
-        if pin_pts.len() < 2 {
-            report.nets_completed += 1; // 0/1-pin net is trivially complete
-            continue;
-        }
-        let mut fully = true;
-        for (ai, bi) in mst_edges(&pin_pts) {
-            match route_connection(
-                board, ctx.grid, &obs, net_id as u32,
-                pin_pts[ai], pin_pts[bi],
-                ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
-            ) {
-                Some(c) => {
-                    // Stamp this connection into the obstacle map BEFORE committing the
-                    // next edge/net, so nothing else can be routed over it.
+    // Route order: smallest-bounding-box (most local/constrained) nets first, so tight
+    // connections claim their short paths before long nets sprawl across the board. Nets
+    // with <2 pins are trivially complete.
+    let mut order: Vec<usize> = (0..net_count).collect();
+    let bbox_span = |nid: usize| -> i64 {
+        let pts = net_pin_points(board, nid);
+        fr_geometry::IntBox::bound(pts.iter().copied())
+            .map(|b| b.width() + b.height())
+            .unwrap_or(0)
+    };
+    let spans: Vec<i64> = (0..net_count).map(bbox_span).collect();
+    order.sort_by_key(|&nid| spans[nid]);
+
+    let mut obs = ObstacleMap::build_with_clearance(board, ctx.grid, ctx.clearance);
+    let mut completed = vec![false; net_count];
+    let via_r = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
+
+    // Multi-pass: retry not-yet-completed nets. Later passes can succeed because the set
+    // of committed traces differs, opening gaps; passes stop when one yields no progress
+    // or the time budget runs out. (A full rip-up-and-reroute is future work; this order
+    // + retry already lifts completion notably.)
+    const MAX_PASSES: usize = 4;
+    for pass in 0..MAX_PASSES {
+        let mut progressed = false;
+        let mut still_incomplete = 0usize;
+        for &net_id in &order {
+            if completed[net_id] {
+                continue;
+            }
+            if budget.map(|b| start.elapsed() >= b).unwrap_or(false) {
+                break;
+            }
+            let pin_pts = net_pin_points(board, net_id);
+            if pin_pts.len() < 2 {
+                completed[net_id] = true;
+                continue;
+            }
+            // Route all MST edges of this net; only commit if ALL succeed, so a partial
+            // net doesn't leave dangling stubs blocking the retry.
+            let mut produced = Vec::new();
+            let mut ok = true;
+            for (ai, bi) in mst_edges(&pin_pts) {
+                match route_connection(
+                    board, ctx.grid, &obs, net_id as u32,
+                    pin_pts[ai], pin_pts[bi],
+                    ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
+                ) {
+                    Some(c) => produced.push(c),
+                    None => { ok = false; break; }
+                }
+            }
+            if ok {
+                for c in &produced {
                     for t in &c.traces {
                         obs.stamp_trace(t.layer, &t.corners, t.width, net_id as u32);
                     }
-                    let vr = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
                     for v in &c.vias {
-                        obs.stamp_via(v.location, vr, net_id as u32);
+                        obs.stamp_via(v.location, via_r, net_id as u32);
                     }
+                }
+                report.connections_routed += produced.len();
+                for c in produced {
                     board.traces.extend(c.traces);
                     board.vias.extend(c.vias);
-                    report.connections_routed += 1;
                 }
-                None => {
-                    report.connections_failed += 1;
-                    fully = false;
-                }
+                completed[net_id] = true;
+                progressed = true;
+            } else {
+                still_incomplete += 1;
             }
         }
-        if fully {
-            report.nets_completed += 1;
+        if !progressed || still_incomplete == 0 {
+            let _ = pass;
+            break;
         }
     }
+
+    report.nets_completed = completed.iter().filter(|c| **c).count();
+    report.passes = MAX_PASSES;
 }
 
 /// Build board.pins from net pin-references if the board has none yet. We can only place
