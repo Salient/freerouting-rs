@@ -52,22 +52,28 @@ try to push it left/right (Adjustment flag) before pricing a ripup.
   `segment_is_clear`, `min_clearance_margin*`. The obstacle query the model needs.
 - `fr_route::astar` driver structure (heap + g/h) — pattern to reuse for the maze.
 
-## Staging (each: build+test green, commit)
-1. **Free-space room geometry** (`room.rs`): lazily build the maximal convex free room
-   containing a seed point on a layer, by clipping a start box against obstacle-separating
-   half-planes from `ObstacleIndex`. Tested: room contains seed, excludes obstacles, is
-   convex. ← START HERE
-2. **Doors + room graph** (`door.rs`): find shared-edge doors between adjacent rooms;
-   lazy neighbour expansion. Tested on hand-built layouts.
-3. **Maze A* over rooms/doors** (`maze.rs`): single net, single layer, any-angle; reach a
-   target point. Tested: finds a path in open space, detours around an obstacle.
-4. **Backtrace to polyline** (`locate.rs`): any-angle tangent sweep → trace corners.
-   Integrate as an alternative single-connection router; A/B vs grid on the real board
-   (expect shorter/any-angle traces, 0 shorts via the exact validator still applied).
-5. **Angle restriction** (any/45/90) in room shape + backtrace. → unblocks task #9 (snap).
-6. **Vias / multi-layer** (drill candidates between layer rooms).
-7. **Shove** of existing traces. → unblocks task #8 (push/shove).
-8. **Interactive single-trace API** + GUI wiring (drag-route, live preview, pad exit). #8/#9
+## Staging (each: build+test green, commit) — STATUS
+1. [DONE] **Free-space room geometry** (`room.rs`): faithful restrain_shape port —
+   maximal convex free room around a seed, carved by clipping against obstacle edge lines
+   (recursive split when an edge cuts the seed). Obstacles = copper inflated to octagons.
+2. [DONE] **Doors** (`room.rs::Room::doors`): contiguous free-space sub-segments of a
+   room's border (Java sorted-neighbour gap-fill equivalent).
+3. [DONE] **Maze A*** (`maze.rs`): best-first over rooms/doors, door sectioning, clear-by-
+   construction (every crossing edge validated by ObstacleIndex).
+4. [DONE] **Backtrace** (`locate.rs::straighten`): string-pull to min-bend any-angle.
+5. [DONE] **Angle restriction** (`locate.rs::straighten_angled`, AngleRestriction): any/45/
+   90 elbow insertion (ninety_corner / fortyfive_corner ports). → task #9.
+6. [DONE] **Vias / multi-layer** (`maze.rs::enqueue_vias`): layer-change frontier elements;
+   via = stacked PathPoint. RoomDoorOptions/route_connection_roomdoor emit per-layer
+   traces + vias.
+7. [DONE] **Shove** (`fr_engine::interactive::commit_shove`): rip-up & reroute (the Java
+   shove's fallback; verbatim MazeShoveTraceAlgo not feasible vs the unified index). #8.
+8. [DONE] **Interactive API + GUI** (`fr_engine::interactive::InteractiveRouter`, GUI
+   "Manual route" panel): begin/preview/commit/commit_shove; drag-route, live preview,
+   snap angle, vias, shove, active layer. #8/#9.
 
-Keep determinism (sorted iteration, integer geometry) and the DRC gates (0/0) green
-throughout. The grid router stays as the default until the model reaches parity.
+REMAINING: make the room/door model the DEFAULT BATCH router (rip-up-reroute over all
+nets) to replace the grid `route_board`. Until then the grid router is the batch default
+(electrically clean via the exact validator) and room/door powers interactive routing.
+
+Keep determinism (sorted iteration, integer geometry) and the DRC gates (0/0) green.

@@ -56,22 +56,28 @@ Honest DRC status: the DRC uses true copper geometry (trace WIDTH + pad radius).
 trace-to-trace == 0 (incremental stamping) and trace-to-PAD == 0 (exact edge validator,
 above). The output is now electrically clean on the real board.
 
-Free-angle room/door model (in progress; see crates/fr-route/ROOMDOOR_DESIGN.md):
-faithful port of the Java autoroute model, built in stages, each committed + tested.
-- DONE stages 1-4 + validation: free-space rooms (restrain_shape port), doors,
-  maze A*, any-angle backtrace, and a single-connection router
-  (`route_connection_roomdoor`). Proven on the real board (tests/roomdoor_ab.rs):
-  36/81 sampled two-pin same-layer nets route any-angle, ALL DRC-clean, total length
-  near the straight-line lower bound.
-- TODO stages 5-8: angle restriction (45/90 snap; unblocks GUI snap setting), vias/
-  multi-layer, push/shove, interactive single-trace GUI wiring (drag-route + pad exit).
-- The GRID router remains the default batch router (electrically clean via the exact
-  validator); the room/door model is being brought to parity before replacing it.
+Free-angle room/door model (DONE stages 1-7; see crates/fr-route/ROOMDOOR_DESIGN.md):
+faithful staged port of the Java autoroute model, each stage committed + tested.
+- 1 free-space rooms (restrain_shape port), 2 doors, 3 maze A*, 4 any-angle backtrace,
+  5 angle restriction (any/45/90), 6 vias/multi-layer, 7 push/shove (rip-up & reroute).
+- fr-route: room.rs / maze.rs / locate.rs; single-connection router
+  `route_connection_roomdoor` (RoomDoorOptions). fr-engine: `interactive::InteractiveRouter`
+  (begin/preview/commit/commit_shove) for manual routing.
+- Proven on the real board (tests/roomdoor_ab.rs): sampled two-pin same-layer nets route
+  any-angle, ALL DRC-clean, total length near the straight-line lower bound.
+- The GRID router is still the DEFAULT batch router (`route_board`, electrically clean via
+  the exact validator). The room/door model powers INTERACTIVE routing in the GUI; making
+  it the default batch router (rip-up-reroute over all nets) is the remaining quality step.
 
-GUI (post-Tier-1): real per-layer pad shapes, filled board outline with contrast, and
-trace/pad/via selection + hover info + selection panel. (padgeom.rs / picking.rs.)
+GUI features:
+- Tier 1: real per-layer pad shapes, filled board outline with contrast, trace/pad/via
+  selection + hover info + selection panel. (padgeom.rs / picking.rs.)
+- Manual routing (room/door model): "Manual route" panel — Route mode, snap angle
+  (Any/45/90), Allow-vias, Shove (rip-up & reroute), active layer. Click to draw, live
+  green/red preview, right-click/Esc to finish. (fr_engine::interactive.)
 
-- Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
+- Make the room/door model the default batch router; human real-Altium import
+  confirmation; quality A/B vs Java oracle; RSS comparison.
 
 Note: Phase 2 (fr-spatial / rstar R-tree) is now USED: `ObstacleIndex` backs both the
 grid A* exact edge validator AND the room/door model's obstacle queries.
