@@ -299,6 +299,9 @@ fn route_incremental(
                     None => { ok = false; break; }
                 }
             }
+            // Commit a net ONLY if all its MST edges routed. A partially-routed net is
+            // discarded entirely (no dangling/isolated stubs on the board) and retried
+            // next pass. This is the "drop partial nets" policy.
             if ok {
                 for c in &produced {
                     for t in &c.traces {
