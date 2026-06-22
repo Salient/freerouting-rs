@@ -64,25 +64,62 @@ pub fn pin_pad_shape(board: &Board, pin: &Pin) -> Option<PadDraw> {
 /// Robust enough for board outlines (no holes, no self-intersection). Empty if the
 /// polygon is degenerate (<3 vertices).
 pub fn triangulate(verts: &[Point]) -> Vec<[usize; 3]> {
+    // Real board outlines have consecutive-duplicate and collinear vertices (e.g. a
+    // 495-pt arc-approximated path). Ear-clipping stalls on those (a duplicate is a
+    // zero-area ear; a collinear triple is never an ear tip), leaking fill into concave
+    // notches. So first clean the ring to a list of "corner" vertices (drop consecutive
+    // duplicates and collinear midpoints), triangulate that, and map the result back to
+    // the ORIGINAL indices so callers (which index into `verts`) stay correct.
     let n = verts.len();
     if n < 3 {
         return Vec::new();
     }
-    // signed area to determine winding; we operate on a CCW copy of the index ring.
-    let area2: i128 = (0..n)
+    // drop consecutive duplicate vertices (keep original indices)
+    let mut ring: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..n {
+        if ring.last().map(|&j| verts[j]) != Some(verts[i]) {
+            ring.push(i);
+        }
+    }
+    if ring.len() >= 2 && verts[ring[0]] == verts[*ring.last().unwrap()] {
+        ring.pop();
+    }
+    // drop collinear midpoints
+    let mut cleaned: Vec<usize> = Vec::with_capacity(ring.len());
+    let rn = ring.len();
+    if rn < 3 {
+        return Vec::new();
+    }
+    for k in 0..rn {
+        let a = verts[ring[(k + rn - 1) % rn]];
+        let b = verts[ring[k]];
+        let c = verts[ring[(k + 1) % rn]];
+        let cross = (b.x - a.x) as i128 * (c.y - a.y) as i128 - (b.y - a.y) as i128 * (c.x - a.x) as i128;
+        if cross != 0 {
+            cleaned.push(ring[k]);
+        }
+    }
+    if cleaned.len() < 3 {
+        return Vec::new();
+    }
+
+    // signed area of the cleaned ring to determine winding; operate on a CCW copy.
+    let cn = cleaned.len();
+    let area2: i128 = (0..cn)
         .map(|i| {
-            let a = verts[i];
-            let b = verts[(i + 1) % n];
+            let a = verts[cleaned[i]];
+            let b = verts[cleaned[(i + 1) % cn]];
             (a.x as i128) * (b.y as i128) - (b.x as i128) * (a.y as i128)
         })
         .sum();
-    let mut idx: Vec<usize> = (0..n).collect();
+    let mut idx: Vec<usize> = cleaned.clone();
     if area2 < 0 {
         idx.reverse(); // make CCW
     }
 
-    let mut tris = Vec::with_capacity(n.saturating_sub(2));
+    let mut tris = Vec::with_capacity(idx.len().saturating_sub(2));
     let mut guard = 0usize;
+    let max_guard = idx.len() * idx.len() + 4;
     while idx.len() > 3 {
         let m = idx.len();
         let mut clipped = false;
@@ -97,7 +134,7 @@ pub fn triangulate(verts: &[Point]) -> Vec<[usize; 3]> {
             if cross <= 0 {
                 continue; // reflex or collinear: not an ear tip
             }
-            // no other vertex inside triangle a-b-c?
+            // no other reflex vertex inside triangle a-b-c?
             let mut empty = true;
             for &j in &idx {
                 if j == ia || j == ib || j == ic {
@@ -116,7 +153,7 @@ pub fn triangulate(verts: &[Point]) -> Vec<[usize; 3]> {
             }
         }
         guard += 1;
-        if !clipped || guard > n * n + 4 {
+        if !clipped || guard > max_guard {
             break; // degenerate / numerical fallback: stop rather than loop forever
         }
     }
@@ -241,5 +278,46 @@ mod tests {
     fn triangulate_degenerate() {
         assert!(triangulate(&[]).is_empty());
         assert!(triangulate(&[Point::new(0, 0), Point::new(1, 1)]).is_empty());
+    }
+
+    /// twice the unsigned area of a polygon.
+    fn poly_area2(v: &[Point]) -> i128 {
+        let n = v.len();
+        let mut a = 0i128;
+        for i in 0..n {
+            let p = v[i];
+            let q = v[(i + 1) % n];
+            a += (p.x as i128) * (q.y as i128) - (q.x as i128) * (p.y as i128);
+        }
+        a.abs()
+    }
+    fn tri_area2(a: Point, b: Point, c: Point) -> i128 {
+        ((b.x - a.x) as i128 * (c.y - a.y) as i128 - (b.y - a.y) as i128 * (c.x - a.x) as i128).abs()
+    }
+
+    #[test]
+    fn triangulate_area_matches_with_duplicate_and_collinear_vertices() {
+        // An L-shape with INSERTED consecutive-duplicate and collinear midpoint vertices,
+        // exactly the pathology a real board outline has (495 pts, 14 dups, 28 collinear).
+        // A correct triangulation's total area must equal the polygon area (no leak into
+        // the notch, no missing fill).
+        let l = vec![
+            Point::new(0, 0),
+            Point::new(50, 0),   // collinear midpoint on the bottom edge
+            Point::new(100, 0),
+            Point::new(100, 0),  // consecutive duplicate
+            Point::new(100, 50),
+            Point::new(50, 50),
+            Point::new(50, 75),  // collinear midpoint on the inner edge
+            Point::new(50, 100),
+            Point::new(0, 100),
+            Point::new(0, 50),   // collinear midpoint on the left edge
+        ];
+        let tris = triangulate(&l);
+        let total: i128 = tris.iter().map(|t| tri_area2(l[t[0]], l[t[1]], l[t[2]])).sum();
+        assert_eq!(total, poly_area2(&l), "triangulation area must equal polygon area");
+        // notch still empty, arm still filled
+        assert!(!tris.iter().any(|t| point_in_tri(Point::new(75, 75), l[t[0]], l[t[1]], l[t[2]])));
+        assert!(tris.iter().any(|t| point_in_tri(Point::new(75, 25), l[t[0]], l[t[1]], l[t[2]])));
     }
 }
