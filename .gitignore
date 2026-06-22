@@ -8,3 +8,5 @@ Cargo.lock.bak
 crates/fr-gui/target
 crates/fr-gui/Cargo.lock
 /target/criterion
+/artifacts/*.ses
+/artifacts/*.ppm
