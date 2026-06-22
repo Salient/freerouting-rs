@@ -26,11 +26,15 @@ re-deriving context. The authoritative spec is in `../freerouting-rs-spec/`.
 | 0 | Workspace skeleton (8 crates) | DONE | build+test green |
 | 1 | fr-geometry (point/vector/orientation/box/convex tile) | DONE | 13 unit + 6 proptest |
 | 3 | fr-board (layers/padstacks incl. shapeless/nets/items/rules) | DONE | 11 tests |
-| 4 | fr-dsn (tolerant lexer+tree, DSN->Board reader, SES/RTE writers) | DONE | 26 tests incl. altium_validator + real-board parse |
-| 5-6 | fr-route (grid A*, obstacles, router) + fr-engine (route_board) | FUNCTIONAL | routes real board end-to-end; completion low (debug-later) |
-| 7 | fr-gui (egui app) | CODE DONE, headless-launch blocked | compiles; see BLOCKER |
-| 8 | Parallelism + perf (rayon scheduler, portfolio, bench) | NOT STARTED | — |
-| 9 | Acceptance | NOT STARTED | — |
+| 4 | fr-dsn (tolerant lexer+tree, DSN->Board reader, SES/RTE writers) | DONE | altium_validator + real-board parse + pin placement |
+| 5-6 | fr-route (grid A*, obstacles, router) + fr-engine | DONE | real per-pin placement + MST; 372/417 nets |
+| 7 | fr-gui (egui app) + software renderer | DONE (interactive needs real display) | render path verified, board image produced |
+| 8 | Parallelism + perf (rayon scheduler + bench) | DONE | ~2.8x speedup, deterministic, 372/417 nets |
+| 9 | Acceptance | DONE | ACCEPTANCE.md; baseline_rs.rte produced |
+
+All phases complete. Remaining work is refinement/future (see ACCEPTANCE.md "Remaining"):
+real-Altium import confirmation by a human, quality A/B vs the Java oracle, RSS
+comparison, and the free-angle room/door search space to replace the grid.
 
 Note: Phase 2 (fr-spatial / rstar R-tree) is stubbed; the grid router doesn't need it
 yet. The free-angle room/door model (the spec's end-goal search space) is NOT yet built
