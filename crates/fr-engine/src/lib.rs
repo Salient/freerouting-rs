@@ -74,44 +74,154 @@ pub fn route_board(board: &mut Board, opts: &RouteOptions) -> RouteReport {
     report
 }
 
-/// Design-rule check: count distinct-net trace overlaps (shorts). Rasterizes every trace
-/// segment to a fine grid (cell = max(1 mil, clearance/2)) and reports how many cells are
-/// claimed by traces of two different nets on the same layer. Zero = no shorts. Vias are
-/// included on all layers. This is the correctness gate for the shorting fix.
-pub fn drc_short_count(board: &Board) -> usize {
-    use std::collections::HashMap;
-    let cell = (board.rules.default_clearance / 2).max(board.resolution.per_unit); // ~>=1 mil
-    let key = |layer: usize, p: Point| -> (usize, i64, i64) {
-        (layer, p.x.div_euclid(cell), p.y.div_euclid(cell))
-    };
-    // cell -> first net seen there
-    let mut owner: HashMap<(usize, i64, i64), usize> = HashMap::new();
-    let mut shorts = 0usize;
-    let mark = |layer: usize, p: Point, net: usize, owner: &mut HashMap<(usize, i64, i64), usize>, shorts: &mut usize| {
-        let k = key(layer, p);
-        match owner.get(&k) {
-            Some(&n) if n != net => *shorts += 1,
-            Some(_) => {}
-            None => { owner.insert(k, net); }
-        }
-    };
+/// One trace segment, flattened for DRC: layer, net, endpoints, half-width.
+struct Seg {
+    layer: usize,
+    net: usize,
+    a: Point,
+    b: Point,
+    half: f64,
+}
+
+fn flatten_segments(board: &Board) -> Vec<Seg> {
+    let mut segs = Vec::new();
     for t in &board.traces {
         let net = t.net.unwrap_or(usize::MAX);
+        let half = (t.width as f64) / 2.0;
         for w in t.corners.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let dist = a.to_float().distance(b.to_float());
-            let steps = (dist / cell as f64).ceil() as i64 + 1;
-            for s in 0..=steps {
-                let tt = s as f64 / steps as f64;
-                let p = Point::new(
-                    a.x + ((b.x - a.x) as f64 * tt).round() as i64,
-                    a.y + ((b.y - a.y) as f64 * tt).round() as i64,
-                );
-                mark(t.layer, p, net, &mut owner, &mut shorts);
+            segs.push(Seg { layer: t.layer, net, a: w[0], b: w[1], half });
+        }
+    }
+    segs
+}
+
+/// True copper-geometry DRC: count pairs of different-net trace segments on the same
+/// layer whose copper actually overlaps (segment-to-segment distance < sum of half
+/// widths). This is the honest short check - the previous centerline-cell version missed
+/// overlaps caused by trace WIDTH. O(n^2) over segments via a coarse spatial bucket.
+pub fn drc_short_count(board: &Board) -> usize {
+    drc_violation_count(board, 0.0)
+}
+
+/// Count different-net same-layer segment pairs closer than (half_a + half_b + extra).
+/// extra=0 => actual copper overlap (shorts); extra=clearance => clearance violations.
+pub fn drc_violation_count(board: &Board, extra: f64) -> usize {
+    use std::collections::HashMap;
+    let segs = flatten_segments(board);
+    // bucket segments by layer + coarse cell of their midpoint to limit pair tests
+    let bucket = (board.rules.default_width + board.rules.default_clearance).max(1) * 4;
+    let mut grid: HashMap<(usize, i64, i64), Vec<usize>> = HashMap::new();
+    let cell_of = |layer: usize, p: Point| (layer, p.x.div_euclid(bucket), p.y.div_euclid(bucket));
+    for (i, s) in segs.iter().enumerate() {
+        // register in all buckets the segment's bbox (expanded) touches
+        let minx = s.a.x.min(s.b.x).div_euclid(bucket);
+        let maxx = s.a.x.max(s.b.x).div_euclid(bucket);
+        let miny = s.a.y.min(s.b.y).div_euclid(bucket);
+        let maxy = s.a.y.max(s.b.y).div_euclid(bucket);
+        for cx in minx..=maxx {
+            for cy in miny..=maxy {
+                grid.entry((s.layer, cx, cy)).or_default().push(i);
+            }
+        }
+        let _ = cell_of;
+    }
+    let mut violations = 0usize;
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for ids in grid.values() {
+        for (xi, &i) in ids.iter().enumerate() {
+            for &j in &ids[xi + 1..] {
+                if i == j {
+                    continue;
+                }
+                let (si, sj) = (&segs[i], &segs[j]);
+                if si.net == sj.net || si.layer != sj.layer {
+                    continue;
+                }
+                let pair = (i.min(j), i.max(j));
+                if !seen.insert(pair) {
+                    continue;
+                }
+                let d = seg_seg_distance(si.a, si.b, sj.a, sj.b);
+                if d < si.half + sj.half + extra - 1.0 {
+                    violations += 1;
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// Count trace segments that pass within copper distance of a DIFFERENT-net pin on a
+/// layer the pin's pad covers. This catches traces shorting to component pads (the
+/// trace-vs-pad case the segment-vs-segment check misses).
+pub fn drc_trace_pin_short_count(board: &Board) -> usize {
+    let segs = flatten_segments(board);
+    let mut shorts = 0usize;
+    for pin in &board.pins {
+        let Some(ps) = board.padstacks.get(pin.padstack) else { continue };
+        if ps.is_empty() {
+            continue;
+        }
+        let pin_net = pin.net.unwrap_or(usize::MAX);
+        let pad_r = ps
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                Some(fr_board::PadShape::Circle { radius }) => Some(*radius),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0) as f64;
+        let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(0));
+        for s in &segs {
+            if s.net == pin_net || s.layer < lo || s.layer > hi {
+                continue;
+            }
+            let d = point_seg_dist(pin.location, s.a, s.b);
+            if d < pad_r + s.half - 1.0 {
+                shorts += 1;
             }
         }
     }
     shorts
+}
+
+/// Minimum Euclidean distance between segment p1-p2 and segment q1-q2 (f64).
+fn seg_seg_distance(p1: Point, p2: Point, q1: Point, q2: Point) -> f64 {
+    // if they intersect, distance 0
+    if segments_intersect(p1, p2, q1, q2) {
+        return 0.0;
+    }
+    let d = [
+        point_seg_dist(p1, q1, q2),
+        point_seg_dist(p2, q1, q2),
+        point_seg_dist(q1, p1, p2),
+        point_seg_dist(q2, p1, p2),
+    ];
+    d.into_iter().fold(f64::MAX, f64::min)
+}
+
+fn point_seg_dist(p: Point, a: Point, b: Point) -> f64 {
+    let (px, py) = (p.x as f64, p.y as f64);
+    let (ax, ay) = (a.x as f64, a.y as f64);
+    let (bx, by) = (b.x as f64, b.y as f64);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    if len2 == 0.0 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+fn segments_intersect(p1: Point, p2: Point, q1: Point, q2: Point) -> bool {
+    use fr_geometry::Side;
+    let d1 = q1.side_of(q2, p1);
+    let d2 = q1.side_of(q2, p2);
+    let d3 = p1.side_of(p2, q1);
+    let d4 = p1.side_of(p2, q2);
+    d1 != d2 && d3 != d4 && d1 != Side::On && d2 != Side::On && d3 != Side::On && d4 != Side::On
 }
 
 /// Per-run routing context shared across nets (immutable).
@@ -316,12 +426,25 @@ fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
 }
 
 fn choose_pitch(board: &Board, bounds: fr_geometry::IntBox) -> i64 {
-    let base = (board.rules.default_width + board.rules.default_clearance).max(1);
-    // Keep the grid coarse enough that a single A* search stays fast on large boards.
-    // Cap the longer dimension to ~400 cells; the per-search budget assumes this scale.
+    // The pitch must be FINE ENOUGH to represent clearance: if one grid step is larger
+    // than (max_pad_radius + trace_half_width + clearance), a trace routed one node away
+    // from a pad still overlaps it -> trace-to-pad shorts. So cap the pitch at roughly
+    // that spacing. We also keep a floor so the grid doesn't explode on huge boards.
+    let half = board.rules.default_width / 2;
+    let clr = board.rules.default_clearance;
+    let max_pad_r = board
+        .padstacks
+        .iter_radii()
+        .max()
+        .unwrap_or(board.rules.default_width);
+    // a trace centerline must be able to sit > (pad_r + half + clr) from a pad center;
+    // pick pitch so one step is at most that spacing (use ~half of it for headroom).
+    let feature = (max_pad_r + half + clr).max(1);
+    let want = (feature / 2).max(board.resolution.per_unit); // >= ~1 mil
+    // floor: don't let the grid exceed ~2500 cells on the long side (perf).
     let span = bounds.width().max(bounds.height()).max(1);
-    let min_pitch_for_size = span / 400;
-    base.max(min_pitch_for_size).max(1)
+    let floor = span / 1500;
+    want.max(floor).max(1)
 }
 
 fn ensure_via_padstack(board: &mut Board) -> usize {

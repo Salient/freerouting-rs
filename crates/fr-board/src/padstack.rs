@@ -73,6 +73,17 @@ impl PadstackSet {
         self.stacks.iter().find(|p| p.name == name)
     }
 
+    /// All circle-shape radii across all padstacks (for sizing the routing grid so it
+    /// can resolve the largest pad's clearance).
+    pub fn iter_radii(&self) -> impl Iterator<Item = i64> + '_ {
+        self.stacks.iter().flat_map(|p| {
+            p.shapes.iter().filter_map(|s| match s {
+                Some(PadShape::Circle { radius }) => Some(*radius),
+                _ => None,
+            })
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.stacks.len()
     }

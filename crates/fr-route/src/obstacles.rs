@@ -74,9 +74,14 @@ impl<'a> ObstacleMap<'a> {
                 })
                 .max()
                 .unwrap_or(grid.pitch);
+            // Reserve the pad radius PLUS a routing trace's half-width, so a passing
+            // different-net trace (routed along node centerlines) keeps its copper edge
+            // clear of the pad (stamp_disc adds clearance on top). Without the extra
+            // half-width a trace one node away can still overlap a large pad.
+            let reserve = radius + board.rules.default_width / 2;
             let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(grid.layers - 1));
             for layer in lo..=hi.min(grid.layers - 1) {
-                map.stamp_disc(layer, pin.location, radius, net);
+                map.stamp_disc(layer, pin.location, reserve, net);
             }
         }
 
