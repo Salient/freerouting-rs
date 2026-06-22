@@ -90,6 +90,73 @@ impl ConvexTile {
         true
     }
 
+    /// Number of border edges (== vertex count for a proper polygon).
+    pub fn border_line_count(&self) -> usize {
+        self.verts.len()
+    }
+
+    /// The `i`-th directed border edge as (from, to). CCW, so the interior is on the LEFT
+    /// of each edge. Panics only on an empty tile (callers guard with `is_empty`).
+    pub fn border_line(&self, i: usize) -> (Point, Point) {
+        let n = self.verts.len();
+        (self.verts[i % n], self.verts[(i + 1) % n])
+    }
+
+    /// Geometric dimension: 2 if it has positive area, 1 if it is a segment/collinear
+    /// (>=2 distinct verts but zero area), 0 if a single point, -1 if empty.
+    pub fn dimension(&self) -> i32 {
+        match self.verts.len() {
+            0 => -1,
+            1 => 0,
+            _ => {
+                if self.signed_area2() != 0 {
+                    2
+                } else {
+                    // distinct points but no area -> segment (1) or coincident point (0)
+                    let first = self.verts[0];
+                    if self.verts.iter().all(|&v| v == first) { 0 } else { 1 }
+                }
+            }
+        }
+    }
+
+    /// Intersection of two convex tiles (Sutherland–Hodgman: clip `self` by every edge
+    /// half-plane of `other`). Both must be CCW. Returns a possibly-empty/degenerate tile.
+    pub fn intersection(&self, other: &ConvexTile) -> ConvexTile {
+        if self.is_empty() || other.is_empty() {
+            return ConvexTile::empty();
+        }
+        let mut out = self.clone();
+        let n = other.verts.len();
+        for i in 0..n {
+            if out.is_empty() {
+                break;
+            }
+            let (a, b) = (other.verts[i], other.verts[(i + 1) % n]);
+            out = out.clip_halfplane(a, b);
+        }
+        out
+    }
+
+    /// True if the directed line through a->b passes through the interior of this tile,
+    /// i.e. the tile has corners strictly on both sides of the line. (Mirrors the Java
+    /// `TileShape.side_of(line) == COLLINEAR` test used by room restraining.)
+    pub fn line_intersects_interior(&self, a: Point, b: Point) -> bool {
+        let mut left = false;
+        let mut right = false;
+        for &c in &self.verts {
+            match a.side_of(b, c) {
+                Side::Left => left = true,
+                Side::Right => right = true,
+                Side::On => {}
+            }
+            if left && right {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Clip this convex tile to the closed left half-plane of the directed line a->b
     /// (keep the part that is Left or On). Returns a new convex tile (possibly empty).
     /// This is the primitive used to carve obstacle-free rooms out of free space.
@@ -202,5 +269,55 @@ mod tests {
         // so the clip keeps the whole tile.
         let clipped = t.clip_halfplane(Point::new(-10, 100), Point::new(-10, 0));
         assert_eq!(clipped.signed_area2(), t.signed_area2());
+    }
+
+    #[test]
+    fn dimension_classification() {
+        assert_eq!(ConvexTile::empty().dimension(), -1);
+        assert_eq!(ConvexTile::from_ccw(vec![Point::new(5, 5)]).dimension(), 0);
+        assert_eq!(ConvexTile::from_ccw(vec![Point::new(0, 0), Point::new(10, 0)]).dimension(), 1);
+        assert_eq!(unit_square().dimension(), 2);
+    }
+
+    #[test]
+    fn intersection_of_overlapping_squares() {
+        let a = ConvexTile::from_box(IntBox::new(0, 0, 100, 100));
+        let b = ConvexTile::from_box(IntBox::new(50, 50, 200, 200));
+        let i = a.intersection(&b);
+        let bb = i.bounding_box().unwrap();
+        assert_eq!(bb, IntBox::new(50, 50, 100, 100));
+        assert_eq!(i.dimension(), 2);
+        assert!(i.contains(Point::new(75, 75)));
+        assert!(!i.contains(Point::new(150, 150)));
+    }
+
+    #[test]
+    fn intersection_disjoint_is_empty_or_degenerate() {
+        let a = ConvexTile::from_box(IntBox::new(0, 0, 10, 10));
+        let b = ConvexTile::from_box(IntBox::new(100, 100, 110, 110));
+        let i = a.intersection(&b);
+        assert!(i.dimension() < 2, "disjoint tiles do not overlap in area");
+    }
+
+    #[test]
+    fn line_intersects_interior_basic() {
+        let sq = unit_square(); // 0..100
+        // vertical line through the middle (x=50) crosses the interior
+        assert!(sq.line_intersects_interior(Point::new(50, -10), Point::new(50, 110)));
+        // a line entirely to the left (x=-5) does not
+        assert!(!sq.line_intersects_interior(Point::new(-5, -10), Point::new(-5, 110)));
+        // a line along the right edge (x=100) only touches the border, not the interior
+        assert!(!sq.line_intersects_interior(Point::new(100, -10), Point::new(100, 110)));
+    }
+
+    #[test]
+    fn border_lines_are_ccw() {
+        let sq = unit_square();
+        assert_eq!(sq.border_line_count(), 4);
+        // the interior point (50,50) is left-of every CCW border edge
+        for i in 0..sq.border_line_count() {
+            let (a, b) = sq.border_line(i);
+            assert_ne!(a.side_of(b, Point::new(50, 50)), Side::Right);
+        }
     }
 }
