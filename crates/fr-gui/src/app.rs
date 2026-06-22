@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Stroke};
 use fr_board::Board;
+use fr_geometry::Point;
 use fr_dsn::{read_board, write_rte, write_ses};
-use fr_engine::{net_ratsnest, route_board, RouteOptions, RouteReport};
+use fr_engine::{net_ratsnest, route_board, AngleRestriction, InteractiveRouter, RouteOptions, RouteReport};
 
 use crate::view::ViewTransform;
 
@@ -39,6 +40,13 @@ pub struct App {
     // selection (click-picked item)
     selected: Option<crate::picking::Pick>,
 
+    // interactive manual routing
+    route_mode: bool,
+    router: Option<InteractiveRouter>,
+    snap_angle: AngleRestriction,
+    allow_vias: bool,
+    active_layer: usize,
+
     // file browser
     show_browser: bool,
     browser_dir: PathBuf,
@@ -64,6 +72,11 @@ impl Default for App {
             show_pads: true,
             highlight_net: None,
             selected: None,
+            route_mode: false,
+            router: None,
+            snap_angle: AngleRestriction::None,
+            allow_vias: true,
+            active_layer: 0,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
@@ -86,6 +99,8 @@ impl App {
                 self.last_report = None;
                 self.highlight_net = None;
                 self.selected = None;
+                self.router = None;
+                self.route_mode = false;
                 self.board = Some(board);
                 self.path_input = path.display().to_string();
                 self.loaded_path = Some(path);
@@ -110,6 +125,7 @@ impl App {
         };
         let report = route_board(board, &opts);
         self.selected = None; // trace/via indices changed
+        self.router = None; // board geometry changed; rebuild router lazily
         self.status = format!(
             "Routed {}/{} nets, {} traces, {} vias ({} incomplete)",
             report.nets_completed, report.nets_total,
@@ -118,12 +134,55 @@ impl App {
         self.last_report = Some(report);
     }
 
+    /// Ensure the interactive router exists (rebuilt from the current board on demand).
+    fn ensure_router(&mut self) {
+        if self.router.is_none() {
+            if let Some(board) = self.board.as_mut() {
+                let mut r = InteractiveRouter::new(board);
+                r.set_angle(self.snap_angle);
+                r.set_allow_vias(self.allow_vias);
+                self.router = Some(r);
+            }
+        }
+    }
+
+    /// Handle a click in route mode at board point `p`: if no route is in progress, start
+    /// one at `p`; otherwise commit a segment to `p`. Both use the active layer.
+    fn route_click(&mut self, p: Point) {
+        self.ensure_router();
+        let layer = self.active_layer;
+        let net = self.highlight_net.map(|n| n as u32).unwrap_or(0);
+        let Some(router) = self.router.as_mut() else { return };
+        if !router.has_start() {
+            router.begin(p, layer, net);
+            self.status = format!(
+                "Manual route started on layer {layer}, net {net}. Click to place; right-click/Esc to finish."
+            );
+        } else if let Some(board) = self.board.as_mut() {
+            if router.commit(board, p, layer) {
+                self.last_report = None;
+                self.status = "Placed a manual route segment.".into();
+            } else {
+                self.status = "No clear route to that point (try another path or layer).".into();
+            }
+        }
+    }
+
+    /// Finish/cancel the in-progress manual route.
+    fn route_finish(&mut self) {
+        if let Some(r) = self.router.as_mut() {
+            r.cancel();
+        }
+        self.status = "Manual route finished.".into();
+    }
+
     fn clear_routes(&mut self) {
         if let Some(board) = self.board.as_mut() {
             board.traces.clear();
             board.vias.clear();
             self.last_report = None;
             self.selected = None;
+            self.router = None;
             self.status = "Cleared all routed traces and vias.".into();
         }
     }
@@ -192,8 +251,18 @@ impl App {
             let q = view_ro.to_board(hp, screen);
             crate::picking::pick_at(board, q, tol_board, &self.layer_visible)
         });
+        // In route mode, a left click routes (start/commit) instead of selecting; a right
+        // click or Esc finishes. Capture intents now; apply after the board borrow ends.
+        let cursor_board = resp.hover_pos().map(|hp| view_ro.to_board(hp, screen));
+        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let route_click_at: Option<Point> = if self.route_mode && resp.clicked() {
+            cursor_board
+        } else {
+            None
+        };
+        let route_finish = self.route_mode && (resp.secondary_clicked() || esc);
         let new_selection: Option<Option<crate::picking::Pick>> =
-            if resp.clicked() { Some(hover_pick) } else { None };
+            if resp.clicked() && !self.route_mode { Some(hover_pick) } else { None };
 
         // board outline: filled substrate (concave-safe via ear-clipping) + edge stroke,
         // giving clear board/background contrast.
@@ -294,16 +363,60 @@ impl App {
             }
         }
 
-        // hover tooltip with item info
-        if let Some(hp) = hover_pick {
-            let text = Self::pick_info(board, hp);
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("pick_tip"), |ui| {
-                ui.label(text);
-            });
+        // Manual-route preview: from the in-progress start to the cursor, draw the would-be
+        // route (green = clear, red = no route). Also mark the route start anchor.
+        if self.route_mode {
+            if let (Some(router), Some(cur)) = (self.router.as_ref(), cursor_board) {
+                if let Some((sp, _sl)) = router.start_point() {
+                    painter.circle_stroke(
+                        view_ro.to_screen(sp, screen), 5.0,
+                        Stroke::new(2.0, Color32::from_rgb(0, 255, 120)),
+                    );
+                    match router.preview(cur, self.active_layer) {
+                        Some(conn) => {
+                            for t in &conn.traces {
+                                for seg in t.corners.windows(2) {
+                                    painter.line_segment(
+                                        [view_ro.to_screen(seg[0], screen), view_ro.to_screen(seg[1], screen)],
+                                        Stroke::new(2.0, Color32::from_rgb(0, 255, 120)),
+                                    );
+                                }
+                            }
+                            for v in &conn.vias {
+                                painter.circle_filled(view_ro.to_screen(v.location, screen), 4.0,
+                                    Color32::from_rgb(0, 255, 120));
+                            }
+                        }
+                        None => {
+                            // no clear route: draw a faint red rubber-band to the cursor
+                            painter.line_segment(
+                                [view_ro.to_screen(sp, screen), view_ro.to_screen(cur, screen)],
+                                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 80, 80, 160)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // hover tooltip with item info (suppressed in route mode to avoid clutter)
+        if !self.route_mode {
+            if let Some(hp) = hover_pick {
+                let text = Self::pick_info(board, hp);
+                egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("pick_tip"), |ui| {
+                    ui.label(text);
+                });
+            }
         }
 
         if let Some(sel) = new_selection {
             self.selected = sel;
+        }
+        // apply captured route-mode intents (board borrow has ended)
+        if route_finish {
+            self.route_finish();
+        } else if let Some(p) = route_click_at {
+            self.route_click(p);
         }
     }
 
@@ -505,6 +618,37 @@ impl eframe::App for App {
                     if self.highlight_net.is_some() && ui.button("Clear highlight").clicked() {
                         self.highlight_net = None;
                     }
+                });
+
+                // Manual routing (free-angle room/door model): toggle route mode, snap
+                // angle, vias, and the active layer. In route mode: click to start a route
+                // at the cursor, click again to place segments, right-click/Esc to finish.
+                ui.collapsing("Manual route", |ui| {
+                    let layer_count = self.board.as_ref().map(|b| b.layer_count().max(1)).unwrap_or(1);
+                    if ui.checkbox(&mut self.route_mode, "Route mode (click to draw)").changed()
+                        && self.route_mode
+                    {
+                        self.ensure_router();
+                    }
+                    ui.label("Snap angle:");
+                    let mut changed = false;
+                    ui.horizontal(|ui| {
+                        changed |= ui.selectable_value(&mut self.snap_angle, AngleRestriction::None, "Any").clicked();
+                        changed |= ui.selectable_value(&mut self.snap_angle, AngleRestriction::FortyFive, "45°").clicked();
+                        changed |= ui.selectable_value(&mut self.snap_angle, AngleRestriction::Ninety, "90°").clicked();
+                    });
+                    let vias_changed = ui.checkbox(&mut self.allow_vias, "Allow vias (layer changes)").changed();
+                    ui.horizontal(|ui| {
+                        ui.label("Active layer:");
+                        ui.add(egui::DragValue::new(&mut self.active_layer).range(0..=(layer_count.saturating_sub(1))));
+                    });
+                    if changed || vias_changed {
+                        if let Some(r) = self.router.as_mut() {
+                            r.set_angle(self.snap_angle);
+                            r.set_allow_vias(self.allow_vias);
+                        }
+                    }
+                    ui.label("Net: highlighted net, or 0. Pick a net under 'Nets' first to route it.");
                 });
 
                 // Selection info: details of the clicked item, with actions.
