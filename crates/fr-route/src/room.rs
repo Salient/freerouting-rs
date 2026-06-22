@@ -39,6 +39,112 @@ impl Room {
     }
 }
 
+/// A door: a border edge of a room that faces FREE space (not a wall on an obstacle or the
+/// global bound). The maze search steps from one room to a neighbour through a door. The
+/// `seg` is the shared boundary segment (used for backtrace); `out_seed` is a point just
+/// across the door in the neighbour's free space (used to complete the neighbour room).
+#[derive(Clone, Copy, Debug)]
+pub struct Door {
+    pub seg: (Point, Point),
+    pub out_seed: Point,
+}
+
+impl Room {
+    /// The doors of this room: contiguous free-space sub-segments of the room's border.
+    ///
+    /// A room edge is part wall, part door: where the outward side is the global bound or
+    /// a different-net obstacle's inflated copper it is a wall; the remaining sub-segments
+    /// face free space (an adjacent free room) and are doors. We find them by sampling each
+    /// edge every ~`step` units and grouping consecutive free samples into door segments —
+    /// a correctness-equivalent optimization over the Java sorted-neighbour gap filling
+    /// (which computes the same free sub-segments analytically). Each door's `out_seed` is
+    /// a free point just across the edge, used to grow the neighbour room.
+    pub fn doors(
+        &self,
+        index: &ObstacleIndex,
+        net: u32,
+        clearance: i64,
+        half_width: i64,
+        bound: IntBox,
+        step: i64,
+    ) -> Vec<Door> {
+        let margin = (clearance + half_width).max(0);
+        let step = step.max(1);
+        // probe a bit further out than the edge so we land in the neighbour interior.
+        let probe_out = (step / 2).max(1);
+        let mut out = Vec::new();
+        let n = self.tile.border_line_count();
+        for i in 0..n {
+            let (a, b) = self.tile.border_line(i);
+            let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-9 {
+                continue;
+            }
+            // outward normal of a CCW edge a->b is (dy, -dx) (right of the edge).
+            let (nx, ny) = (dy / len, -dx / len);
+            let samples = (len / step as f64).floor() as i64 + 1;
+            // group consecutive free samples into sub-segment [run_start_t, run_end_t].
+            let mut run_start: Option<f64> = None;
+            let mut last_free_t = 0.0f64;
+            let emit = |t0: f64, t1: f64, out: &mut Vec<Door>| {
+                let sa = Point::new(
+                    (a.x as f64 + dx * t0).round() as i64,
+                    (a.y as f64 + dy * t0).round() as i64,
+                );
+                let sb = Point::new(
+                    (a.x as f64 + dx * t1).round() as i64,
+                    (a.y as f64 + dy * t1).round() as i64,
+                );
+                let mt = 0.5 * (t0 + t1);
+                let m = Point::new(
+                    (a.x as f64 + dx * mt).round() as i64,
+                    (a.y as f64 + dy * mt).round() as i64,
+                );
+                let seed = Point::new(
+                    m.x + (nx * probe_out as f64).round() as i64,
+                    m.y + (ny * probe_out as f64).round() as i64,
+                );
+                out.push(Door { seg: (sa, sb), out_seed: seed });
+            };
+            for s in 0..=samples {
+                let t = if samples == 0 { 0.0 } else { s as f64 / samples as f64 };
+                let on = Point::new(
+                    (a.x as f64 + dx * t).round() as i64,
+                    (a.y as f64 + dy * t).round() as i64,
+                );
+                let probe = Point::new(
+                    on.x + (nx * probe_out as f64).round() as i64,
+                    on.y + (ny * probe_out as f64).round() as i64,
+                );
+                let free = bound.contains(probe)
+                    && !point_blocked(index, self.layer, probe, net, margin);
+                if free {
+                    if run_start.is_none() {
+                        run_start = Some(t);
+                    }
+                    last_free_t = t;
+                } else if let Some(t0) = run_start.take() {
+                    emit(t0, last_free_t, &mut out);
+                }
+            }
+            if let Some(t0) = run_start.take() {
+                emit(t0, last_free_t, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// True if `p` is within `margin` of (i.e. inside the inflated copper of) some different-
+/// net obstacle on `layer`. Uses a zero-length segment clearance query.
+fn point_blocked(index: &ObstacleIndex, layer: usize, p: Point, net: u32, margin: i64) -> bool {
+    match index.min_clearance_margin_within(layer, p, p, 0, net, margin.max(1)) {
+        Some(gap) => gap < margin as f64,
+        None => false,
+    }
+}
+
 /// Build the free-space room(s) around `seed_pt` on `layer`. `clearance + half_width` is
 /// the margin kept from every different-net obstacle. Returns every maximal convex room
 /// whose interior is obstacle-free and that contains part of the seed; the first room in
@@ -394,6 +500,35 @@ mod tests {
         // not contain a point inside the inflated copper.
         assert!(!room.contains(Point::new(680, 500)));
         assert!(!room.contains(Point::new(700, 500)));
+    }
+
+    #[test]
+    fn empty_room_doors_only_on_bound_edges_are_walls() {
+        // A room equal to the full bound has all 4 edges on the bound -> no doors.
+        let mut index = idx(1);
+        index.build();
+        let bound = IntBox::new(0, 0, 1000, 1000);
+        let room = complete_room(&index, 0, Point::new(500, 500), 0, 0, 0, bound).unwrap();
+        let doors = room.doors(&index, 0, 0, 0, bound, 5);
+        assert!(doors.is_empty(), "a room filling the bound has only walls, got {}", doors.len());
+    }
+
+    #[test]
+    fn room_clipped_by_pad_has_a_door_on_the_clip_edge() {
+        // One pad to the right: the room's right boundary is a chord facing free space
+        // around the pad -> at least one door; the pad-facing wall is not a door.
+        let mut index = idx(1);
+        index.add_disc(0, Point::new(800, 500), 40, 7);
+        index.build();
+        let bound = IntBox::new(0, 0, 1000, 1000);
+        let room = complete_room(&index, 0, Point::new(300, 500), 0, 0, 10, bound).unwrap();
+        let doors = room.doors(&index, 0, 0, 10, bound, 5);
+        assert!(!doors.is_empty(), "expected at least one door facing free space");
+        // every door's out_seed must be in free space (not inside the inflated pad)
+        for d in &doors {
+            assert!(!point_blocked(&index, 0, d.out_seed, 0, 50),
+                "door out_seed must be free, got {:?}", d.out_seed);
+        }
     }
 
     #[test]

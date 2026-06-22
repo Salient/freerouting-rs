@@ -7,6 +7,7 @@
 
 pub mod astar;
 pub mod grid;
+pub mod maze;
 pub mod obstacles;
 pub mod room;
 pub mod router;
