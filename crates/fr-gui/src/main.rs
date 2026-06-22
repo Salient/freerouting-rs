@@ -6,6 +6,7 @@
 //! verification, under xvfb (see harness / MILESTONES Phase 7).
 
 mod app;
+mod padgeom;
 mod render;
 mod view;
 

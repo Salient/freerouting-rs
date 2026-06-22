@@ -69,18 +69,41 @@ pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
         (s.x.round() as i32, s.y.round() as i32)
     };
 
-    // board outline
-    if board.outline.len() >= 2 {
+    // board outline: filled substrate (concave-safe) + edge stroke.
+    if board.outline.len() >= 3 {
+        let fill = [20, 56, 44, 255];
+        for tri in crate::padgeom::triangulate(&board.outline) {
+            fill_triangle(
+                &mut img,
+                to_px(board.outline[tri[0]]),
+                to_px(board.outline[tri[1]]),
+                to_px(board.outline[tri[2]]),
+                fill,
+            );
+        }
         for i in 0..board.outline.len() {
             let a = to_px(board.outline[i]);
             let b = to_px(board.outline[(i + 1) % board.outline.len()]);
-            draw_line(&mut img, a, b, [160, 160, 160, 255]);
+            draw_line(&mut img, a, b, [120, 200, 170, 255]);
         }
     }
-    // pads
+    // pads: real per-layer copper geometry, scaled.
     for pin in &board.pins {
-        let (x, y) = to_px(pin.location);
-        draw_dot(&mut img, x, y, 1, [110, 110, 110, 255]);
+        match crate::padgeom::pin_pad_shape(board, pin) {
+            Some(crate::padgeom::PadDraw::Circle { center, radius }) => {
+                let (x, y) = to_px(center);
+                let r = ((radius as f64 * vt.scale).round() as i32).max(1);
+                fill_circle(&mut img, x, y, r, [170, 160, 90, 255]);
+            }
+            Some(crate::padgeom::PadDraw::Poly(verts)) => {
+                let px: Vec<(i32, i32)> = verts.iter().map(|&p| to_px(p)).collect();
+                // fan triangulation is fine here (pad polygons are convex)
+                for i in 1..px.len().saturating_sub(1) {
+                    fill_triangle(&mut img, px[0], px[i], px[i + 1], [170, 160, 90, 255]);
+                }
+            }
+            None => {}
+        }
     }
     // traces (per-layer color)
     for t in &board.traces {
@@ -103,6 +126,52 @@ fn draw_dot(img: &mut Image, cx: i32, cy: i32, r: i32, c: [u8; 4]) {
             img.set(cx + dx, cy + dy, c);
         }
     }
+}
+
+/// Filled disc of radius `r` pixels.
+fn fill_circle(img: &mut Image, cx: i32, cy: i32, r: i32, c: [u8; 4]) {
+    let r2 = r * r;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r2 {
+                img.set(cx + dx, cy + dy, c);
+            }
+        }
+    }
+}
+
+/// Filled triangle via barycentric scanline over its bounding box.
+fn fill_triangle(img: &mut Image, a: (i32, i32), b: (i32, i32), cc: (i32, i32), col: [u8; 4]) {
+    let min_x = a.0.min(b.0).min(cc.0).max(0);
+    let max_x = a.0.max(b.0).max(cc.0).min(img.width as i32 - 1);
+    let min_y = a.1.min(b.1).min(cc.1).max(0);
+    let max_y = a.1.max(b.1).max(cc.1).min(img.height as i32 - 1);
+    let area = edge(a, b, cc);
+    if area == 0 {
+        return; // degenerate
+    }
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let p = (x, y);
+            let w0 = edge(b, cc, p);
+            let w1 = edge(cc, a, p);
+            let w2 = edge(a, b, p);
+            // inside if all weights share the sign of `area`
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            };
+            if inside {
+                img.set(x, y, col);
+            }
+        }
+    }
+}
+
+/// Twice the signed area of (a,b,p) — the edge function for barycentric rasterization.
+fn edge(a: (i32, i32), b: (i32, i32), p: (i32, i32)) -> i64 {
+    (b.0 - a.0) as i64 * (p.1 - a.1) as i64 - (b.1 - a.1) as i64 * (p.0 - a.0) as i64
 }
 
 /// Bresenham line.

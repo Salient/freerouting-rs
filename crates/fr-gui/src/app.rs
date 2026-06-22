@@ -154,7 +154,8 @@ impl App {
         };
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let screen = resp.rect;
-        painter.rect_filled(screen, 0.0, Color32::from_rgb(18, 20, 18));
+        // Dark neutral backdrop, clearly distinct from the (greener) board substrate.
+        painter.rect_filled(screen, 0.0, Color32::from_rgb(12, 12, 16));
 
         if self.view.is_none() || self.refit {
             let bounds = board
@@ -175,22 +176,47 @@ impl App {
             view.zoom_at((scroll as f64 * 0.002).exp(), anchor, screen);
         }
 
-        // board outline
-        if board.outline.len() >= 2 {
-            let pts: Vec<Pos2> = board.outline.iter().map(|&p| view.to_screen(p, screen)).collect();
-            for i in 0..pts.len() {
-                painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], Stroke::new(1.5, Color32::from_gray(150)));
+        // board outline: filled substrate (concave-safe via ear-clipping) + edge stroke,
+        // giving clear board/background contrast.
+        if board.outline.len() >= 3 {
+            let board_fill = Color32::from_rgb(20, 56, 44); // dark PCB green-teal
+            for tri in crate::padgeom::triangulate(&board.outline) {
+                let p = [
+                    view.to_screen(board.outline[tri[0]], screen),
+                    view.to_screen(board.outline[tri[1]], screen),
+                    view.to_screen(board.outline[tri[2]], screen),
+                ];
+                painter.add(egui::Shape::convex_polygon(p.to_vec(), board_fill, Stroke::NONE));
+            }
+            let edge: Vec<Pos2> = board.outline.iter().map(|&p| view.to_screen(p, screen)).collect();
+            for i in 0..edge.len() {
+                painter.line_segment(
+                    [edge[i], edge[(i + 1) % edge.len()]],
+                    Stroke::new(1.8, Color32::from_rgb(120, 200, 170)),
+                );
             }
         }
 
-        // pads
+        // pads: real per-layer copper geometry (circle radius / convex polygon), scaled.
         if self.show_pads {
             for pin in &board.pins {
-                let c = view.to_screen(pin.location, screen);
-                if screen.contains(c) {
-                    let hl = self.highlight_net.is_some() && pin.net == self.highlight_net;
-                    let col = if hl { Color32::WHITE } else { Color32::from_gray(105) };
-                    painter.circle_filled(c, if hl { 2.5 } else { 1.5 }, col);
+                let Some(shape) = crate::padgeom::pin_pad_shape(board, pin) else { continue };
+                let hl = self.highlight_net.is_some() && pin.net == self.highlight_net;
+                let col = if hl {
+                    Color32::from_rgb(245, 230, 130)
+                } else {
+                    Color32::from_rgb(170, 160, 90) // brass/pad color, distinct from traces
+                };
+                match shape {
+                    crate::padgeom::PadDraw::Circle { center, radius } => {
+                        let c = view.to_screen(center, screen);
+                        let r = ((radius as f64 * view.scale) as f32).max(1.0);
+                        painter.circle_filled(c, r, col);
+                    }
+                    crate::padgeom::PadDraw::Poly(verts) => {
+                        let pts: Vec<Pos2> = verts.iter().map(|&p| view.to_screen(p, screen)).collect();
+                        painter.add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
+                    }
                 }
             }
         }
