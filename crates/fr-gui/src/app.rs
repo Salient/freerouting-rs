@@ -24,6 +24,8 @@ pub struct App {
     status: String,
     last_report: Option<RouteReport>,
     loaded_path: Option<PathBuf>,
+    warnings: Vec<String>,
+    show_warnings: bool,
 
     // routing parameters (config panel)
     opt_max_time: u64,
@@ -48,6 +50,10 @@ pub struct App {
     shove: bool,
     active_layer: usize,
 
+    // layer emphasis: fade non-active layers (opacity + desaturation) so the active layer
+    // stands out. Configurable; on by default.
+    fade_inactive: bool,
+
     // file browser
     show_browser: bool,
     browser_dir: PathBuf,
@@ -64,6 +70,8 @@ impl Default for App {
             status: "Open a Specctra .dsn (Browse… or type a path) to begin.".into(),
             last_report: None,
             loaded_path: None,
+            warnings: Vec::new(),
+            show_warnings: false,
             opt_max_time: 0,
             opt_threads: 0,
             opt_width_mil: 0.0,
@@ -79,6 +87,7 @@ impl Default for App {
             allow_vias: true,
             shove: false,
             active_layer: 0,
+            fade_inactive: true,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
@@ -97,6 +106,8 @@ impl App {
                     board.name, board.layer_count(), board.nets.len(),
                     board.components.len(), warnings.len()
                 );
+                self.warnings = warnings;
+                self.active_layer = self.active_layer.min(board.layer_count().saturating_sub(1));
                 self.refit = true;
                 self.last_report = None;
                 self.highlight_net = None;
@@ -223,6 +234,25 @@ impl App {
         PALETTE[layer % PALETTE.len()]
     }
 
+    /// Color for drawing copper on `layer`, emphasizing the active layer: the active layer
+    /// (or all layers when fade is off) gets its full palette color; other layers are
+    /// desaturated toward gray and dimmed, so the current layer reads as "on top". Returns
+    /// the color and a draw-order hint (false = faded/behind, true = active/front).
+    fn layer_style(&self, layer: usize) -> (Color32, bool) {
+        let base = Self::layer_color(layer);
+        if !self.fade_inactive || layer == self.active_layer {
+            return (base, layer == self.active_layer);
+        }
+        // desaturate toward the channel average, then dim (toward the dark background).
+        let avg = ((base.r() as u32 + base.g() as u32 + base.b() as u32) / 3) as u8;
+        let mix = |c: u8| -> u8 {
+            // 60% toward gray, then scaled to ~45% brightness
+            let desat = (c as u32 * 40 + avg as u32 * 60) / 100;
+            (desat * 45 / 100) as u8
+        };
+        (Color32::from_rgb(mix(base.r()), mix(base.g()), mix(base.b())), false)
+    }
+
     fn draw_board(&mut self, ui: &mut egui::Ui) {
         let Some(board) = &self.board else {
             ui.centered_and_justified(|ui| { ui.label("No board loaded."); });
@@ -241,21 +271,31 @@ impl App {
             self.view = Some(ViewTransform::fit(bounds, screen));
             self.refit = false;
         }
-        let view = self.view.as_mut().unwrap();
-
-        if resp.dragged() {
-            view.pan_pixels(resp.drag_delta());
+        let (scroll, mods) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers));
+        // Ctrl/Shift + wheel cycles the active layer (plain wheel stays zoom). Capture the
+        // intent; apply after the board borrow ends (cycle_layer borrows self mutably).
+        let mut layer_wheel: i64 = 0;
+        // Pan/zoom mutate the view; scope that borrow tightly so the rest of draw_board can
+        // call &self methods (layer_style) while only reading the view via `view_ro`.
+        {
+            let view = self.view.as_mut().unwrap();
+            if resp.dragged() {
+                view.pan_pixels(resp.drag_delta());
+            }
+            if scroll.abs() > 0.0 {
+                if mods.ctrl || mods.shift {
+                    layer_wheel = if scroll > 0.0 { 1 } else { -1 };
+                } else {
+                    let anchor = resp.hover_pos().unwrap_or(screen.center());
+                    view.zoom_at((scroll as f64 * 0.002).exp(), anchor, screen);
+                }
+            }
         }
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll.abs() > 0.0 {
-            let anchor = resp.hover_pos().unwrap_or(screen.center());
-            view.zoom_at((scroll as f64 * 0.002).exp(), anchor, screen);
-        }
+        let view_ro = *self.view.as_ref().unwrap();
 
         // Hit-test under the cursor (within a few-pixel tolerance, converted to board
         // units). Used for the hover tooltip and click selection. A drag is a pan, not a
         // pick, so only treat a non-drag click as a selection.
-        let view_ro = *view;
         let tol_board = 5.0 / view_ro.scale.max(1e-9);
         let hover_pick = resp.hover_pos().and_then(|hp| {
             let q = view_ro.to_board(hp, screen);
@@ -285,7 +325,7 @@ impl App {
             for tri in crate::padgeom::triangulate(&board.outline) {
                 let base = mesh.vertices.len() as u32;
                 for &vi in &tri {
-                    mesh.colored_vertex(view.to_screen(board.outline[vi], screen), board_fill);
+                    mesh.colored_vertex(view_ro.to_screen(board.outline[vi], screen), board_fill);
                 }
                 mesh.add_triangle(base, base + 1, base + 2);
             }
@@ -293,7 +333,7 @@ impl App {
                 painter.add(egui::Shape::mesh(mesh));
             }
             // bright, bold edge so the board boundary is unmistakable.
-            let edge: Vec<Pos2> = board.outline.iter().map(|&p| view.to_screen(p, screen)).collect();
+            let edge: Vec<Pos2> = board.outline.iter().map(|&p| view_ro.to_screen(p, screen)).collect();
             for i in 0..edge.len() {
                 painter.line_segment(
                     [edge[i], edge[(i + 1) % edge.len()]],
@@ -302,26 +342,30 @@ impl App {
             }
         }
 
-        // pads: real per-layer copper geometry (circle radius / convex polygon), scaled.
+        // pads: real per-layer copper geometry (circle radius / convex polygon), scaled and
+        // tinted by the layer the pad sits on (active layer prominent, others faded). Draw
+        // faded pads first, then active-layer pads, so the current layer reads as on top.
+        // A highlighted net's pads override with a bright accent.
         if self.show_pads {
-            for pin in &board.pins {
-                let Some(shape) = crate::padgeom::pin_pad_shape(board, pin) else { continue };
+            let draw_pad = |pin: &fr_board::Pin, painter: &egui::Painter, front_pass: bool| {
+                let Some(shape) = crate::padgeom::pin_pad_shape(board, pin) else { return };
+                let player = pad_layer(board, pin, self.active_layer);
+                let (lcol, is_active) = self.layer_style(player);
+                if is_active != front_pass {
+                    return; // two-pass: faded behind, active in front
+                }
                 let hl = self.highlight_net.is_some() && pin.net == self.highlight_net;
-                let col = if hl {
-                    Color32::from_rgb(245, 230, 130)
-                } else {
-                    Color32::from_rgb(170, 160, 90) // brass/pad color, distinct from traces
-                };
+                let col = if hl { Color32::from_rgb(245, 230, 130) } else { lcol };
                 match shape {
                     crate::padgeom::PadDraw::Circle { center, radius } => {
-                        let c = view.to_screen(center, screen);
-                        let r = ((radius as f64 * view.scale) as f32).max(1.0);
+                        let c = view_ro.to_screen(center, screen);
+                        let r = ((radius as f64 * view_ro.scale) as f32).max(1.0);
                         painter.circle_filled(c, r, col);
                     }
                     crate::padgeom::PadDraw::Poly(verts) => {
                         // Mesh fill (winding-independent under the Y-flip), fan-triangulated
                         // since pad polygons are convex.
-                        let pts: Vec<Pos2> = verts.iter().map(|&p| view.to_screen(p, screen)).collect();
+                        let pts: Vec<Pos2> = verts.iter().map(|&p| view_ro.to_screen(p, screen)).collect();
                         if pts.len() >= 3 {
                             let mut mesh = egui::epaint::Mesh::default();
                             for &p in &pts {
@@ -334,6 +378,12 @@ impl App {
                         }
                     }
                 }
+            };
+            for pin in &board.pins {
+                draw_pad(pin, &painter, false); // faded (behind)
+            }
+            for pin in &board.pins {
+                draw_pad(pin, &painter, true); // active layer (front)
             }
         }
 
@@ -343,7 +393,7 @@ impl App {
                 for &nid in &rep.unrouted_nets {
                     for (a, b) in net_ratsnest(board, nid) {
                         painter.line_segment(
-                            [view.to_screen(a, screen), view.to_screen(b, screen)],
+                            [view_ro.to_screen(a, screen), view_ro.to_screen(b, screen)],
                             Stroke::new(0.5, Color32::from_rgb(90, 90, 70)),
                         );
                     }
@@ -351,28 +401,35 @@ impl App {
             }
         }
 
-        // traces
-        for t in &board.traces {
-            if t.layer >= self.layer_visible.len() || !self.layer_visible[t.layer] {
-                continue;
-            }
-            let dim = self.highlight_net.is_some() && t.net != self.highlight_net;
-            let mut col = Self::layer_color(t.layer);
-            if dim {
-                col = col.gamma_multiply(0.25);
-            }
-            let w = (((t.width as f64) * view.scale).max(1.0) as f32).min(6.0);
-            for seg in t.corners.windows(2) {
-                painter.line_segment(
-                    [view.to_screen(seg[0], screen), view.to_screen(seg[1], screen)],
-                    Stroke::new(w, col),
-                );
+        // traces: per-layer color with active-layer emphasis. Two passes (faded then
+        // active) so current-layer traces draw on top of the others.
+        for front_pass in [false, true] {
+            for t in &board.traces {
+                if t.layer >= self.layer_visible.len() || !self.layer_visible[t.layer] {
+                    continue;
+                }
+                let (lcol, is_active) = self.layer_style(t.layer);
+                if is_active != front_pass {
+                    continue;
+                }
+                let mut col = lcol;
+                if self.highlight_net.is_some() && t.net != self.highlight_net {
+                    col = col.gamma_multiply(0.25);
+                }
+                let w = (((t.width as f64) * view_ro.scale).max(1.0) as f32).min(6.0);
+                for seg in t.corners.windows(2) {
+                    painter.line_segment(
+                        [view_ro.to_screen(seg[0], screen), view_ro.to_screen(seg[1], screen)],
+                        Stroke::new(w, col),
+                    );
+                }
             }
         }
 
-        // vias
+        // vias: span layers, so always drawn prominent (white ring), dimmed only when a
+        // different net is highlighted.
         for v in &board.vias {
-            let c = view.to_screen(v.location, screen);
+            let c = view_ro.to_screen(v.location, screen);
             let dim = self.highlight_net.is_some() && v.net != self.highlight_net;
             let col = if dim { Color32::from_gray(120) } else { Color32::WHITE };
             painter.circle_stroke(c, 3.0, Stroke::new(1.5, col));
@@ -445,6 +502,9 @@ impl App {
             self.route_finish();
         } else if let Some(p) = route_click_at {
             self.route_click(p);
+        }
+        if layer_wheel != 0 {
+            self.cycle_layer(layer_wheel);
         }
     }
 
@@ -593,9 +653,49 @@ impl App {
     }
 }
 
+impl App {
+    /// Number of layers in the loaded board (>=1), or 1 if none.
+    fn layer_count(&self) -> usize {
+        self.board.as_ref().map(|b| b.layer_count().max(1)).unwrap_or(1)
+    }
+
+    /// Cycle the active layer by `delta` (wrapping), keeping the manual router (which uses
+    /// the active layer) in sync.
+    fn cycle_layer(&mut self, delta: i64) {
+        let n = self.layer_count() as i64;
+        if n <= 1 {
+            return;
+        }
+        self.active_layer = (((self.active_layer as i64 + delta) % n + n) % n) as usize;
+        self.status = self
+            .board
+            .as_ref()
+            .and_then(|b| b.layers.layers().get(self.active_layer))
+            .map(|l| format!("Active layer: {} ({})", self.active_layer, l.name))
+            .unwrap_or_else(|| format!("Active layer: {}", self.active_layer));
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let has_board = self.board.is_some();
+
+        // Layer cycling via keyboard: [ / ] (and ← / → as aliases) step the active layer.
+        // Mouse wheel is reserved for zoom; Ctrl/Shift+wheel cycles layers (handled in the
+        // canvas). Ignore the keys while a text field has focus.
+        if has_board && !ctx.wants_keyboard_input() {
+            let (mut dn, mut up) = (false, false);
+            ctx.input(|i| {
+                dn = i.key_pressed(egui::Key::OpenBracket) || i.key_pressed(egui::Key::ArrowLeft);
+                up = i.key_pressed(egui::Key::CloseBracket) || i.key_pressed(egui::Key::ArrowRight);
+            });
+            if dn {
+                self.cycle_layer(-1);
+            }
+            if up {
+                self.cycle_layer(1);
+            }
+        }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -627,8 +727,39 @@ impl eframe::App for App {
                 if ui.add_enabled(has_board, egui::Button::new("Export SES")).clicked() {
                     self.export("ses");
                 }
+                if !self.warnings.is_empty() {
+                    ui.separator();
+                    // warning button with a count badge; amber so it stands out.
+                    let label = format!("⚠ Warnings ({})", self.warnings.len());
+                    let btn = egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(240, 200, 80)));
+                    if ui.add(btn).clicked() {
+                        self.show_warnings = !self.show_warnings;
+                    }
+                }
             });
         });
+
+        // Warnings window: the DSN-load warnings (missing images, shapeless padstacks,
+        // unparsed shapes, …). Toggled from the toolbar.
+        if self.show_warnings {
+            let mut open = self.show_warnings;
+            egui::Window::new(format!("Load warnings ({})", self.warnings.len()))
+                .open(&mut open)
+                .resizable(true)
+                .default_size([560.0, 360.0])
+                .show(ctx, |ui| {
+                    if self.warnings.is_empty() {
+                        ui.label("No warnings.");
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (i, w) in self.warnings.iter().enumerate() {
+                                ui.label(format!("{}. {}", i + 1, w));
+                            }
+                        });
+                    }
+                });
+            self.show_warnings = open;
+        }
 
         egui::SidePanel::left("panel").resizable(true).default_width(220.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -643,6 +774,7 @@ impl eframe::App for App {
                 ui.collapsing("View", |ui| {
                     ui.checkbox(&mut self.show_ratsnest, "Ratsnest (unrouted)");
                     ui.checkbox(&mut self.show_pads, "Pads");
+                    ui.checkbox(&mut self.fade_inactive, "Fade inactive layers");
                     if self.highlight_net.is_some() && ui.button("Clear highlight").clicked() {
                         self.highlight_net = None;
                     }
@@ -714,13 +846,23 @@ impl eframe::App for App {
 
                 ui.collapsing("Layers", |ui| {
                     if let Some(board) = &self.board {
+                        ui.label("● = active (radio); ☑ = visible. [ ] or ←/→ to cycle.");
                         for (i, layer) in board.layers.layers().iter().enumerate() {
                             if i < self.layer_visible.len() {
                                 ui.horizontal(|ui| {
+                                    // active-layer radio
+                                    if ui.radio(self.active_layer == i, "").clicked() {
+                                        self.active_layer = i;
+                                    }
                                     ui.checkbox(&mut self.layer_visible[i], "");
                                     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
                                     ui.painter().rect_filled(rect, 2.0, App::layer_color(i));
-                                    ui.label(&layer.name);
+                                    let name = if self.active_layer == i {
+                                        egui::RichText::new(&layer.name).strong()
+                                    } else {
+                                        egui::RichText::new(&layer.name)
+                                    };
+                                    ui.label(name);
                                 });
                             }
                         }
@@ -756,5 +898,19 @@ impl eframe::App for App {
         });
 
         self.file_browser(ctx);
+    }
+}
+
+/// The representative layer to color a pad by: the active layer if the pin's padstack
+/// carries copper there (so a pad on the current layer reads as active), otherwise the
+/// padstack's top copper layer. Falls back to 0.
+fn pad_layer(board: &Board, pin: &fr_board::Pin, active: usize) -> usize {
+    let Some(ps) = board.padstacks.get(pin.padstack) else { return 0 };
+    let lo = ps.from_layer().unwrap_or(0);
+    let hi = ps.to_layer().unwrap_or(lo);
+    if active >= lo && active <= hi {
+        active
+    } else {
+        lo
     }
 }
