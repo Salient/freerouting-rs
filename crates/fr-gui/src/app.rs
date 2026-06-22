@@ -36,6 +36,9 @@ pub struct App {
     show_pads: bool,
     highlight_net: Option<usize>,
 
+    // selection (click-picked item)
+    selected: Option<crate::picking::Pick>,
+
     // file browser
     show_browser: bool,
     browser_dir: PathBuf,
@@ -60,6 +63,7 @@ impl Default for App {
             show_ratsnest: true,
             show_pads: true,
             highlight_net: None,
+            selected: None,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
@@ -81,6 +85,7 @@ impl App {
                 self.refit = true;
                 self.last_report = None;
                 self.highlight_net = None;
+                self.selected = None;
                 self.board = Some(board);
                 self.path_input = path.display().to_string();
                 self.loaded_path = Some(path);
@@ -104,6 +109,7 @@ impl App {
             max_layers: self.opt_max_layers,
         };
         let report = route_board(board, &opts);
+        self.selected = None; // trace/via indices changed
         self.status = format!(
             "Routed {}/{} nets, {} traces, {} vias ({} incomplete)",
             report.nets_completed, report.nets_total,
@@ -117,6 +123,7 @@ impl App {
             board.traces.clear();
             board.vias.clear();
             self.last_report = None;
+            self.selected = None;
             self.status = "Cleared all routed traces and vias.".into();
         }
     }
@@ -175,6 +182,18 @@ impl App {
             let anchor = resp.hover_pos().unwrap_or(screen.center());
             view.zoom_at((scroll as f64 * 0.002).exp(), anchor, screen);
         }
+
+        // Hit-test under the cursor (within a few-pixel tolerance, converted to board
+        // units). Used for the hover tooltip and click selection. A drag is a pan, not a
+        // pick, so only treat a non-drag click as a selection.
+        let view_ro = *view;
+        let tol_board = 5.0 / view_ro.scale.max(1e-9);
+        let hover_pick = resp.hover_pos().and_then(|hp| {
+            let q = view_ro.to_board(hp, screen);
+            crate::picking::pick_at(board, q, tol_board, &self.layer_visible)
+        });
+        let new_selection: Option<Option<crate::picking::Pick>> =
+            if resp.clicked() { Some(hover_pick) } else { None };
 
         // board outline: filled substrate (concave-safe via ear-clipping) + edge stroke,
         // giving clear board/background contrast.
@@ -260,6 +279,119 @@ impl App {
             let dim = self.highlight_net.is_some() && v.net != self.highlight_net;
             let col = if dim { Color32::from_gray(120) } else { Color32::WHITE };
             painter.circle_stroke(c, 3.0, Stroke::new(1.5, col));
+        }
+
+        // selection highlight (cyan): outline the currently-selected item.
+        if let Some(sel) = self.selected {
+            Self::stroke_pick(&painter, board, &view_ro, screen, sel,
+                Stroke::new(2.5, Color32::from_rgb(0, 230, 255)));
+        }
+        // hover highlight (faint white) when not the same as the selection.
+        if let Some(hp) = hover_pick {
+            if Some(hp) != self.selected {
+                Self::stroke_pick(&painter, board, &view_ro, screen, hp,
+                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 160)));
+            }
+        }
+
+        // hover tooltip with item info
+        if let Some(hp) = hover_pick {
+            let text = Self::pick_info(board, hp);
+            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("pick_tip"), |ui| {
+                ui.label(text);
+            });
+        }
+
+        if let Some(sel) = new_selection {
+            self.selected = sel;
+        }
+    }
+
+    /// Stroke an outline around a picked item for selection/hover feedback.
+    fn stroke_pick(
+        painter: &egui::Painter,
+        board: &Board,
+        view: &ViewTransform,
+        screen: egui::Rect,
+        pick: crate::picking::Pick,
+        stroke: Stroke,
+    ) {
+        use crate::picking::Pick;
+        match pick {
+            Pick::Trace { index } => {
+                if let Some(t) = board.traces.get(index) {
+                    for seg in t.corners.windows(2) {
+                        painter.line_segment(
+                            [view.to_screen(seg[0], screen), view.to_screen(seg[1], screen)],
+                            stroke,
+                        );
+                    }
+                }
+            }
+            Pick::Via { index } => {
+                if let Some(v) = board.vias.get(index) {
+                    painter.circle_stroke(view.to_screen(v.location, screen), 5.0, stroke);
+                }
+            }
+            Pick::Pad { pin_index } => {
+                if let Some(pin) = board.pins.get(pin_index) {
+                    if let Some(shape) = crate::padgeom::pin_pad_shape(board, pin) {
+                        match shape {
+                            crate::padgeom::PadDraw::Circle { center, radius } => {
+                                let r = ((radius as f64 * view.scale) as f32).max(2.0) + 1.5;
+                                painter.circle_stroke(view.to_screen(center, screen), r, stroke);
+                            }
+                            crate::padgeom::PadDraw::Poly(verts) => {
+                                let pts: Vec<Pos2> = verts.iter().map(|&p| view.to_screen(p, screen)).collect();
+                                for i in 0..pts.len() {
+                                    painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], stroke);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Human-readable info for a picked item (net, layer, width, coords).
+    fn pick_info(board: &Board, pick: crate::picking::Pick) -> String {
+        use crate::picking::Pick;
+        let per_unit = board.resolution.per_unit as f64;
+        let net_name = |net: Option<usize>| -> String {
+            net.and_then(|n| board.nets.get(n)).map(|x| x.name.clone())
+                .unwrap_or_else(|| "<no net>".into())
+        };
+        match pick {
+            Pick::Trace { index } => {
+                let Some(t) = board.traces.get(index) else { return "trace".into() };
+                let layer = board.layers.layers().get(t.layer).map(|l| l.name.as_str()).unwrap_or("?");
+                let len: f64 = t.corners.windows(2)
+                    .map(|s| ((s[1].x - s[0].x) as f64).hypot((s[1].y - s[0].y) as f64))
+                    .sum();
+                format!(
+                    "Trace\nnet: {}\nlayer: {}\nwidth: {:.1} mil\nlength: {:.1} mil\ncorners: {}",
+                    net_name(t.net), layer, t.width as f64 / per_unit, len / per_unit, t.corners.len()
+                )
+            }
+            Pick::Via { index } => {
+                let Some(v) = board.vias.get(index) else { return "via".into() };
+                let ps = board.padstacks.get(v.padstack).map(|p| p.name.as_str()).unwrap_or("?");
+                format!(
+                    "Via\nnet: {}\npadstack: {}\nat: ({:.1}, {:.1}) mil",
+                    net_name(v.net), ps,
+                    v.location.x as f64 / per_unit, v.location.y as f64 / per_unit
+                )
+            }
+            Pick::Pad { pin_index } => {
+                let Some(pin) = board.pins.get(pin_index) else { return "pad".into() };
+                let ps = board.padstacks.get(pin.padstack).map(|p| p.name.as_str()).unwrap_or("?");
+                format!(
+                    "Pad {}-{}\nnet: {}\npadstack: {}\nat: ({:.1}, {:.1}) mil",
+                    pin.component, pin.name, net_name(pin.net), ps,
+                    pin.location.x as f64 / per_unit, pin.location.y as f64 / per_unit
+                )
+            }
         }
     }
 
@@ -374,6 +506,38 @@ impl eframe::App for App {
                         self.highlight_net = None;
                     }
                 });
+
+                // Selection info: details of the clicked item, with actions.
+                let mut do_highlight_net: Option<usize> = None;
+                let mut do_clear_selection = false;
+                if let (Some(board), Some(sel)) = (&self.board, self.selected) {
+                    let info = Self::pick_info(board, sel);
+                    let net = match sel {
+                        crate::picking::Pick::Trace { index } =>
+                            board.traces.get(index).and_then(|t| t.net),
+                        crate::picking::Pick::Via { index } =>
+                            board.vias.get(index).and_then(|v| v.net),
+                        crate::picking::Pick::Pad { pin_index } =>
+                            board.pins.get(pin_index).and_then(|p| p.net),
+                    };
+                    ui.collapsing("Selection", |ui| {
+                        ui.label(info);
+                        ui.horizontal(|ui| {
+                            if net.is_some() && ui.button("Highlight net").clicked() {
+                                do_highlight_net = net;
+                            }
+                            if ui.button("Clear selection").clicked() {
+                                do_clear_selection = true;
+                            }
+                        });
+                    });
+                }
+                if do_highlight_net.is_some() {
+                    self.highlight_net = do_highlight_net;
+                }
+                if do_clear_selection {
+                    self.selected = None;
+                }
 
                 ui.collapsing("Layers", |ui| {
                     if let Some(board) = &self.board {

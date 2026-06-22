@@ -7,6 +7,7 @@
 
 mod app;
 mod padgeom;
+mod picking;
 mod render;
 mod view;
 
