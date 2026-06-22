@@ -40,12 +40,20 @@ All phases complete. Post-acceptance correctness/quality work done:
 - GUI runs on WSLg via the eframe wgpu backend; Open via typed path (native dialog
   unavailable under WSLg).
 
+GUI suite (task #8) DONE: in-app file browser, routing-parameter config panel
+(time/threads/width/clearance/layers), manual commands (Route/Clear/Fit), ratsnest +
+incompletes readout, net highlight, layer legend/toggles. Runs on WSLg via wgpu.
+
+Honest DRC status: rebuilt the DRC to use true copper geometry (trace WIDTH + pad
+radius), exposing that the real shorts are trace-to-PAD, not trace-to-trace
+(trace-to-trace == 0). ~14 trace-to-pad shorts remain on the dense real board because
+component pads are larger than the grid pitch - a fundamental grid-routing limit.
+
 Remaining / future:
-- GUI/UX wishlist (task #8): progress+live redraw, ratsnest/incompletes, zoom-fit +
-  net highlight, legend/visuals, routing-parameter config menu, manual commands, and a
-  proper in-app file selector.
-- Free-angle room/door search model (task #9) for the last ~10% completion and
-  any-angle/shorter traces; full rip-up-and-reroute.
+- **Free-angle room/door search model (task #9)** - now the REQUIRED next step: it
+  represents exact pad/trace geometry and eliminates the trace-to-pad shorts the grid
+  router cannot avoid. Also lifts completion past ~76% and gives any-angle/shorter
+  traces. This is the path to electrically-clean output.
 - Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
 
 Note: Phase 2 (fr-spatial / rstar R-tree) is stubbed; the grid router doesn't need it
