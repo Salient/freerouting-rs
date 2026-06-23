@@ -3,6 +3,26 @@
 Last updated before a planned restart. This file lets a fresh session resume without
 re-deriving context. The authoritative spec is in `../freerouting-rs-spec/`.
 
+## Overnight session 2026-06-22/23 — what changed (newest first)
+Fixed from user feedback + autonomous work (all committed, 19 workspace test blocks green):
+- Manual route: starts on the clicked pad (adopts its net+layer, highlights net), completes
+  on a destination pad, Esc exits route mode, "✏ Manual" toolbar button.
+- Vias maintain clearance from pads (via_is_clear gate); redundant vias at through-hole
+  pads skipped. Honest completion 289/417 (the old "374" counted 117 electrically-broken
+  nets); DRC 0/0; 0 via-pad collisions; 0 multilayer nets missing vias.
+- Per-pin `(rotate)` token now applied → pads on C152/U99 etc. oriented correctly.
+- Overlapping-pad import check (MOSFET tied S/D = OK; 2-terminal touch = flagged).
+- Board outline is the real L-shaped `(path)` boundary (was the rect sheet); concave fill
+  triangulation hardened (dups/collinear).
+- Keepouts parsed + enforced (84). Pre-existing `(wiring)` loaded as fixed copper (5862
+  wires + 308 vias) — displayed + obstacle.
+- Java color scheme; per-layer pad/trace color + active-layer fade; layer cycling (↑/↓, [],
+  ctrl/shift+wheel); warnings viewer; unlimited undo/redo; clearance halos.
+- Java GUI parity: Incompletes/DRC/Stats/Components/Nets windows, Ratsnest+Violations
+  toggles, Delete selected, cursor-coord status bar, keepout + violation rendering.
+- Triage of all remaining work in OUTSTANDING.md. Single unified binary
+  `freerouting-rs-gui` (GUI default, --headless / --render).
+
 ## How to resume
 
 1. Read `../freerouting-rs-spec/{README,REQUIREMENTS,ARCHITECTURE,ALGORITHM,ALTIUM_COMPAT,MILESTONES}.md`.
