@@ -50,6 +50,21 @@ panics exist in the code; the items below are missing features / approximations.
 12. RSS-vs-JVM performance comparison. (manual)
 
 ## Done in this round (for reference)
-Outline (L-shape), concave fill, rect/polygon pads, pad rotation, missing-via fix,
-manual-route start/net/cancel, select-highlights-net, layer cycling (↑/↓), wider tooltip,
-unlimited undo/redo, Java color scheme. Grid DRC 0/0; 19 workspace test blocks green.
+Outline (L-shape), concave fill, rect/polygon pads, per-pin pad rotation, overlap
+detection, missing-via fix, via-pad clearance gate, manual-route start/net/cancel/complete,
+Esc-exits-mode, Manual toolbar button, select-highlights-net, layer cycling (↑/↓ + wheel),
+wider tooltip, unlimited undo/redo, Java color scheme. Keepouts parsed+enforced (84),
+pre-existing wiring loaded (5862). Java parity: Incompletes/DRC/Stats/Components/Nets/Help
+windows, Ratsnest/Violations toggles, Delete, cursor-coord status bar. Efficiency:
+single-pass off-board mask, bbox-only keepout scan, reusable A* scratch (no 15MB/search
+allocs). Altium harness: FREEROUTING_WORK env, DrcReport + RoundTrip procedures. UI: dark
+modern visuals. Grid DRC 0/0; 19 workspace test blocks green.
+
+## Still open (next session)
+- Make the room/door model the DEFAULT BATCH router (rip-up-reroute over all nets) — the
+  biggest remaining quality lever (interactive routing already uses it). #4 above.
+- `(plane ...)` power-plane parsing (#3). Per-net class rules if a board has them (#5).
+- GUI live redraw during routing (#8). Manual A/B vs Java oracle, RSS, live-Altium import.
+- Exact (offset-polygon) convex-pad clearance instead of circumscribed disc (#6/#7).
+- More Java parity (drag-component mode, stitch routing, clearance-matrix editor) — see
+  the agent inventory; lower priority than batch room/door routing.
