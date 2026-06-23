@@ -116,13 +116,19 @@ any-angle/shorter traces. The A* driver and `EdgeValidator` are now structured s
 room/door model changes only the neighbour generation; the exact clearance kernel
 (fr-spatial) is already the obstacle query it needs.
 
+## Outstanding work — see OUTSTANDING.md (triage scan 2026-06-22)
+Top HIGH-impact correctness gaps found by the scan:
+- **Keepouts ignored** by the DSN reader (175+ regions) — router can cross them.
+- **Pre-existing `(wiring)` discarded** (5870 wires) — we re-route from scratch and don't
+  avoid existing copper.
+Plus: grid is still the default batch router (room/door is built but interactive-only);
+per-net class/rule widths ignored; A/B + RSS + live-Altium import still manual.
+
 ## Smaller open items
-- fr-spatial (rstar) R-tree is now wired into the A* edge validator (was unused). The
-  room/door model can reuse `ObstacleIndex` directly for its obstacle queries.
-- Polygon-pour pads approximated as circles in the DSN reader (reader.rs TODO).
-- GUI: live redraw DURING routing (currently routes synchronously then redraws); a
-  background routing thread + progress channel would let the canvas animate.
-- Human real-Altium import confirmation; quality A/B vs Java oracle; RSS comparison.
+- GUI: live redraw DURING routing (synchronous then redraw); a background routing thread +
+  progress channel would animate the canvas.
+- Polygon pad clearance halo is approximate in the GUI; convex pads use a circumscribed
+  disc in the obstacle index/DRC (conservative).
 
 ## Next steps (recommended order on resume)
 
