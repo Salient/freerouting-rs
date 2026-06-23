@@ -128,6 +128,38 @@ impl<'a> ObstacleMap<'a> {
         }
     }
 
+    /// Block every grid cell whose center is inside `polygon` (with `clearance` margin) on
+    /// `layer` (or all layers if None), owned by nobody — a keepout. Routing cannot enter.
+    pub fn block_polygon(&mut self, polygon: &[Point], layer: Option<usize>, clearance: i64) {
+        if polygon.len() < 3 {
+            return;
+        }
+        let bb = match fr_geometry::IntBox::bound(polygon.iter().copied()) {
+            Some(b) => b.offset(clearance.max(0)),
+            None => return,
+        };
+        let layers: Vec<usize> = match layer {
+            Some(l) if l < self.grid.layers => vec![l],
+            _ => (0..self.grid.layers).collect(),
+        };
+        for &layer in &layers {
+            for col in 0..self.grid.cols as i32 {
+                for row in 0..self.grid.rows as i32 {
+                    let n = Node { layer: layer as u32, col, row };
+                    let p = self.grid.point_of(n);
+                    if !bb.contains(p) {
+                        continue;
+                    }
+                    if polygon_contains(polygon, p) {
+                        let i = self.idx(n);
+                        self.blocked[layer][i] = true;
+                        self.owner[layer][i] = NO_OWNER;
+                    }
+                }
+            }
+        }
+    }
+
     /// Stamp a routed trace (full rasterized path, width + clearance) tagged with `net`.
     /// Used to add a net's geometry to the map incrementally as routing progresses, so
     /// the next net's search sees it and cannot overlap it (the fix for shorting).

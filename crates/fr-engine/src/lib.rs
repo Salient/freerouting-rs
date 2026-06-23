@@ -354,6 +354,26 @@ pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
             idx.add_via(0, layers - 1, v.location, r, net);
         }
     }
+    // Keepouts: add the polygon boundary as NO_NET segments so the exact edge validator
+    // rejects any trace crossing into the region (the grid ObstacleMap blocks the interior
+    // cells; together they keep routing out of keepouts).
+    for ko in &board.keepouts {
+        if ko.polygon.len() < 2 {
+            continue;
+        }
+        let layers_iter: Vec<usize> = match ko.layer {
+            Some(l) if l < layers => vec![l],
+            _ => (0..layers).collect(),
+        };
+        // closed boundary
+        let mut ring = ko.polygon.clone();
+        if ring.first() != ring.last() {
+            ring.push(ring[0]);
+        }
+        for &l in &layers_iter {
+            idx.add_trace(l, &ring, 1, NO_NET);
+        }
+    }
     idx.build();
     idx
 }
@@ -386,6 +406,11 @@ fn route_incremental(
     order.sort_by_key(|&nid| spans[nid]);
 
     let mut obs = ObstacleMap::build_with_clearance(board, ctx.grid, ctx.clearance);
+    // Block keepout regions: no net may route inside them. The grid map blocks interior
+    // cells; the exact index (below) blocks crossings of the boundary.
+    for ko in &board.keepouts {
+        obs.block_polygon(&ko.polygon, ko.layer, ctx.clearance);
+    }
     // Exact-geometry obstacle index, used by the A* edge validator to reject trace
     // segments that would clip a different-net pad/trace between two passable grid cells.
     // Kept in lock-step with `obs`: every committed trace/via is added to BOTH.

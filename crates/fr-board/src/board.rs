@@ -39,6 +39,18 @@ pub struct Board {
     pub traces: Vec<Trace>,
     /// Routed vias.
     pub vias: Vec<Via>,
+    /// Keepout regions: routing is forbidden inside these polygons on their layer(s).
+    pub keepouts: Vec<Keepout>,
+}
+
+/// A keepout region: a polygon on a specific layer (or all layers if `layer` is None)
+/// inside which routing is forbidden. Parsed from the DSN `(keepout ...)` scopes.
+#[derive(Clone, Debug)]
+pub struct Keepout {
+    /// Layer index, or None for all layers (a `pcb`/`signal` keepout).
+    pub layer: Option<usize>,
+    /// Polygon corners (board units). A rectangle is stored as its 4 corners.
+    pub polygon: Vec<Point>,
 }
 
 impl Board {
@@ -55,6 +67,7 @@ impl Board {
             outline: Vec::new(),
             traces: Vec::new(),
             vias: Vec::new(),
+            keepouts: Vec::new(),
         }
     }
 

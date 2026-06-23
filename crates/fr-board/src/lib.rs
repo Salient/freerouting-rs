@@ -9,7 +9,7 @@ mod padstack;
 mod rules;
 mod units;
 
-pub use board::{Board, Component};
+pub use board::{Board, Component, Keepout};
 pub use item::{FixedState, Pin, Trace, Via};
 pub use layer::{Direction, Layer, LayerStack};
 pub use net::{Net, NetSet};

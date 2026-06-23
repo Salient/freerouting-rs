@@ -28,6 +28,7 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
         board.layers = read_layers(structure);
         board.rules = read_rules(structure, &board.rules, resolution, &mut warnings);
         board.outline = read_outline(structure, resolution);
+        board.keepouts = read_keepouts(structure, &board.layers, resolution);
     }
     let layer_count = board.layers.count().max(1);
 
@@ -330,6 +331,51 @@ fn read_outline(structure: &Sexp, res: Resolution) -> Vec<Point> {
     } else {
         rect_fallback
     }
+}
+
+/// Parse `(keepout ...)` regions from the structure scope. Each keepout has a `(rect L ..)`
+/// or `(path L w x y ...)` on layer `L` (or `pcb`/`signal` for all layers). Routing is
+/// forbidden inside these. Both the structure-level and any nested keepouts are collected.
+fn read_keepouts(structure: &Sexp, layers: &LayerStack, res: Resolution) -> Vec<fr_board::Keepout> {
+    let mut out = Vec::new();
+    for ko in structure.children("keepout") {
+        // resolve the layer token from the rect/path child.
+        let (layer_tok, polygon) = if let Some(rect) = ko.child("rect") {
+            let a = rect.atom_args();
+            let lt = a.first().copied().unwrap_or("signal").to_string();
+            let nums: Vec<f64> = a.iter().skip(1).filter_map(|s| parse_num(s)).collect();
+            if nums.len() < 4 {
+                continue;
+            }
+            let (x1, y1, x2, y2) = (nums[0], nums[1], nums[2], nums[3]);
+            (lt, vec![
+                scale_pt(x1, y1, res), scale_pt(x2, y1, res),
+                scale_pt(x2, y2, res), scale_pt(x1, y2, res),
+            ])
+        } else if let Some(path) = ko.child("path") {
+            let a = path.atom_args();
+            let lt = a.first().copied().unwrap_or("signal").to_string();
+            // path <layer> <width> x y x y ...
+            let nums: Vec<f64> = a.iter().skip(2).filter_map(|s| parse_num(s)).collect();
+            let mut poly: Vec<Point> = nums.chunks_exact(2).map(|c| scale_pt(c[0], c[1], res)).collect();
+            if poly.len() >= 2 && poly.first() == poly.last() {
+                poly.pop();
+            }
+            if poly.len() < 2 {
+                continue;
+            }
+            (lt, poly)
+        } else {
+            continue;
+        };
+        let layer = if layer_tok.eq_ignore_ascii_case("signal") || layer_tok.eq_ignore_ascii_case("pcb") {
+            None
+        } else {
+            layers.index_of(&layer_tok)
+        };
+        out.push(fr_board::Keepout { layer, polygon });
+    }
+    out
 }
 
 fn read_padstacks(
