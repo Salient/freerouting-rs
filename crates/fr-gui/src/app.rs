@@ -218,8 +218,11 @@ impl App {
     fn route(&mut self) {
         self.push_undo();
         let Some(board) = self.board.as_mut() else { return };
-        board.traces.clear();
-        board.vias.clear();
+        // Keep FIXED copper (pre-existing wiring + locked routes); only drop previously
+        // AUTOROUTED traces/vias so re-routing fills in unrouted nets rather than wiping
+        // good existing routing. route_board then skips nets that already have copper.
+        board.traces.retain(|t| t.fixed == fr_board::FixedState::Fix);
+        board.vias.retain(|v| v.fixed == fr_board::FixedState::Fix);
         let per_unit = board.resolution.per_unit as f64;
         let opts = RouteOptions {
             max_time_secs: self.opt_max_time,
@@ -534,10 +537,22 @@ impl App {
             match pick {
                 crate::picking::Pick::Pad { pin_index } => {
                     if let Some(pin) = board.pins.get(pin_index) {
+                        // Start on the ACTIVE layer if the pad's copper covers it (e.g. a
+                        // through-hole pad spans all layers — starting on the bottom layer
+                        // the user is viewing avoids an immediate jump to layer 0 and a
+                        // spurious via). Otherwise start on the pad's first copper layer.
                         let layer = board
                             .padstacks
                             .get(pin.padstack)
-                            .and_then(|ps| ps.from_layer())
+                            .map(|ps| {
+                                let lo = ps.from_layer().unwrap_or(self.active_layer);
+                                let hi = ps.to_layer().unwrap_or(lo);
+                                if self.active_layer >= lo && self.active_layer <= hi {
+                                    self.active_layer
+                                } else {
+                                    lo
+                                }
+                            })
                             .unwrap_or(self.active_layer);
                         return (pin.location, layer, pin.net.unwrap_or(0) as u32);
                     }

@@ -492,6 +492,25 @@ fn route_incremental(
     // Kept in lock-step with `obs`: every committed trace/via is added to BOTH.
     let mut index = build_obstacle_index(board, ctx.grid.layers);
     let mut completed = vec![false; net_count];
+    // Nets that ALREADY have copper on the board (pre-existing fixed wiring, or a prior
+    // partial route) are treated as done — we keep their traces and don't re-route them.
+    // This is what lets "Route" fill in only the UNROUTED nets instead of wiping good
+    // existing routing. (A net with no pre-existing trace is routed normally.)
+    {
+        let mut has_copper = vec![false; net_count];
+        for t in &board.traces {
+            if let Some(n) = t.net {
+                if n < net_count {
+                    has_copper[n] = true;
+                }
+            }
+        }
+        for n in 0..net_count {
+            if has_copper[n] {
+                completed[n] = true;
+            }
+        }
+    }
     let via_r = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
     let via_exact_r = fr_route::via_radius(board, ctx.via_padstack, 0).max(1);
     // Reusable A* working memory — allocated once for the whole run instead of per
