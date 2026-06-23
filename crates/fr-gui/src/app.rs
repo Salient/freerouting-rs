@@ -67,6 +67,7 @@ pub struct App {
     show_stats_win: bool,
     show_components_win: bool,
     show_nets_win: bool,
+    show_help_win: bool,
     comp_filter: String,
     net_filter: String,
     // cached DRC violations (recomputed on demand)
@@ -129,6 +130,7 @@ impl Default for App {
             show_stats_win: false,
             show_components_win: false,
             show_nets_win: false,
+            show_help_win: false,
             comp_filter: String::new(),
             net_filter: String::new(),
             violations: Vec::new(),
@@ -381,6 +383,36 @@ impl App {
                 self.highlight_net = Some(id);
             }
             self.show_nets_win = open;
+        }
+
+        // Help / keyboard shortcuts.
+        if self.show_help_win {
+            let mut open = self.show_help_win;
+            egui::Window::new("Help — controls & shortcuts")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([460.0, 380.0])
+                .show(ctx, |ui| {
+                    ui.heading("Mouse");
+                    ui.monospace("drag           pan");
+                    ui.monospace("wheel          zoom");
+                    ui.monospace("ctrl/shift+wheel  cycle active layer");
+                    ui.monospace("click          select item (highlights its net)");
+                    ui.separator();
+                    ui.heading("Keyboard");
+                    ui.monospace("↑ / ↓  or  [ / ]   cycle active layer");
+                    ui.monospace("Ctrl+Z / Ctrl+Y    undo / redo");
+                    ui.monospace("Esc                exit manual-route mode");
+                    ui.separator();
+                    ui.heading("Manual routing");
+                    ui.monospace("✏ Manual           toggle route mode");
+                    ui.monospace("click a pad        start a route on its net");
+                    ui.monospace("click              place a segment");
+                    ui.monospace("click dest. pad    complete the connection");
+                    ui.monospace("right-click        cancel current route");
+                    ui.label("Snap angle, vias, shove, and active layer are in the side panel.");
+                });
+            self.show_help_win = open;
         }
 
         // Board statistics.
@@ -1294,6 +1326,9 @@ impl eframe::App for App {
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Stats…")).clicked() {
                     self.show_stats_win = !self.show_stats_win;
+                }
+                if ui.button("?").on_hover_text("Keyboard shortcuts & help").clicked() {
+                    self.show_help_win = !self.show_help_win;
                 }
                 if !self.warnings.is_empty() {
                     ui.separator();

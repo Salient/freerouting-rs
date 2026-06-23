@@ -193,7 +193,19 @@ fn run_gui(input: Option<PathBuf>) -> anyhow::Result<()> {
     eframe::run_native(
         "freerouting-rs",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // modern dark visuals: a touch more spacing + rounding than the egui default.
+            use eframe::egui;
+            let ctx = &cc.egui_ctx;
+            ctx.set_visuals(egui::Visuals::dark());
+            ctx.style_mut(|s| {
+                s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+                s.spacing.button_padding = egui::vec2(8.0, 4.0);
+                s.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+                s.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+                s.visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+                s.visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+            });
             let mut a = App::default();
             if let Some(path) = input {
                 a.load_path(path);
