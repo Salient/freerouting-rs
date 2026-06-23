@@ -12,7 +12,10 @@ pub use interactive::InteractiveRouter;
 
 use fr_board::{Board, PadShape, Padstack, Pin};
 use fr_geometry::{point_seg_dist, seg_seg_dist, Point};
-use fr_route::{route_connection, Costs, EdgeValidator, Grid, ObstacleIndex, ObstacleMap, NO_NET};
+use fr_route::{
+    route_connection_scratch, AStarScratch, Costs, EdgeValidator, Grid, ObstacleIndex,
+    ObstacleMap, NO_NET,
+};
 
 /// Options controlling a routing run.
 #[derive(Clone, Copy, Debug)]
@@ -491,6 +494,9 @@ fn route_incremental(
     let mut completed = vec![false; net_count];
     let via_r = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
     let via_exact_r = fr_route::via_radius(board, ctx.via_padstack, 0).max(1);
+    // Reusable A* working memory — allocated once for the whole run instead of per
+    // connection (the dense arrays are ~15 MB on the real grid).
+    let mut scratch = AStarScratch::new(ctx.grid);
 
     // Multi-pass: retry not-yet-completed nets. Later passes can succeed because the set
     // of committed traces differs, opening gaps; passes stop when one yields no progress
@@ -522,11 +528,11 @@ fn route_incremental(
                 clearance: ctx.clearance,
             };
             for (ai, bi) in mst_edges(&pin_pts) {
-                match route_connection(
+                match route_connection_scratch(
                     board, ctx.grid, &obs, net_id as u32,
                     pin_pts[ai], pin_pts[bi],
                     ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
-                    Some(&validator),
+                    Some(&validator), None, None, &mut scratch,
                 ) {
                     Some(c) => produced.push(c),
                     None => { ok = false; break; }

@@ -1,7 +1,7 @@
 //! Single-net routing: drive the A* between a net's pins and convert the resulting
 //! grid path into board traces (one per layer run) and vias (at layer changes).
 
-use crate::astar::{search, Costs, EdgeValidator};
+use crate::astar::{Costs, EdgeValidator};
 use crate::grid::{Grid, Node};
 use crate::obstacles::ObstacleMap;
 use fr_board::{Board, FixedState, Trace, Via};
@@ -57,6 +57,33 @@ pub fn route_connection_on_layers(
     start_layers: Option<&[usize]>,
     goal_layers: Option<&[usize]>,
 ) -> Option<RoutedConnection> {
+    let mut scratch = crate::astar::AStarScratch::new(grid);
+    route_connection_scratch(
+        board, grid, obs, net, start_pt, goal_pt, width, via_padstack, costs, max_expansions,
+        validator, start_layers, goal_layers, &mut scratch,
+    )
+}
+
+/// Like `route_connection_on_layers`, but reuses a caller-owned `AStarScratch` across
+/// calls so the A* dense arrays (~15 MB on the real grid) are allocated once per routing
+/// run, not once per connection. This is the engine's hot-loop entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn route_connection_scratch(
+    board: &Board,
+    grid: &Grid,
+    obs: &ObstacleMap,
+    net: u32,
+    start_pt: Point,
+    goal_pt: Point,
+    width: i64,
+    via_padstack: Option<usize>,
+    costs: &Costs,
+    max_expansions: usize,
+    validator: Option<&EdgeValidator>,
+    start_layers: Option<&[usize]>,
+    goal_layers: Option<&[usize]>,
+    scratch: &mut crate::astar::AStarScratch,
+) -> Option<RoutedConnection> {
     let layers_of = |restrict: Option<&[usize]>, pt: Point| -> Vec<Node> {
         match restrict {
             Some(ls) if !ls.is_empty() => ls
@@ -70,7 +97,9 @@ pub fn route_connection_on_layers(
     let starts = layers_of(start_layers, start_pt);
     let goals = layers_of(goal_layers, goal_pt);
 
-    let path = search(grid, obs, net, &starts, &goals, costs, max_expansions, validator)?;
+    let path = crate::astar::search_scratch(
+        grid, obs, net, &starts, &goals, costs, max_expansions, validator, scratch,
+    )?;
     Some(path_to_geometry(board, grid, net, &path, width, via_padstack))
 }
 

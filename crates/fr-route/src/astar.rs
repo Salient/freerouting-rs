@@ -98,6 +98,10 @@ fn heuristic(a: Node, b: Node, c: &Costs) -> i64 {
 /// Find a least-cost path from any node in `starts` to any node in `goals`, staying on
 /// cells passable for `net`. Returns the node path start..goal, or None if unreachable.
 /// `max_expansions` bounds the work (so a hard net cannot stall the whole board).
+///
+/// This wrapper allocates a fresh scratch buffer per call (fine for tests / one-off use).
+/// The engine's hot loop should reuse an `AStarScratch` across calls via `search_scratch`
+/// to avoid re-allocating + zeroing ~15 MB of dense arrays on every search.
 #[allow(clippy::too_many_arguments)]
 pub fn search(
     grid: &Grid,
@@ -109,21 +113,80 @@ pub fn search(
     max_expansions: usize,
     validator: Option<&EdgeValidator>,
 ) -> Option<Vec<Node>> {
+    let mut scratch = AStarScratch::new(grid);
+    search_scratch(grid, obs, net, starts, goals, costs, max_expansions, validator, &mut scratch)
+}
+
+/// Reusable A* working memory: the dense per-node arrays, kept across searches so they are
+/// allocated once per routing run instead of once per connection. A monotonically
+/// increasing `generation` stamp marks which cells are "live" this search, so we never
+/// have to zero the whole array — a cell is unvisited unless its stored generation equals
+/// the current one. `touched` records the cells written this search so `goal_flag` can be
+/// cleared cheaply.
+pub struct AStarScratch {
+    n_nodes: usize,
+    generation: u32,
+    /// (generation, g_score) per node; stale if gen != current.
+    gen_of: Vec<u32>,
+    g_score: Vec<i64>,
+    came_from: Vec<u32>,
+    goal_flag: Vec<bool>,
+    touched_goals: Vec<usize>,
+}
+
+impl AStarScratch {
+    pub fn new(grid: &Grid) -> AStarScratch {
+        let n = (grid.cols * grid.rows * grid.layers as i64) as usize;
+        AStarScratch {
+            n_nodes: n,
+            generation: 0,
+            gen_of: vec![0; n],
+            g_score: vec![i64::MAX; n],
+            came_from: vec![u32::MAX; n],
+            goal_flag: vec![false; n],
+            touched_goals: Vec::new(),
+        }
+    }
+}
+
+/// A*-with-reusable-scratch. Behaviour is identical to `search`; only the working memory
+/// is supplied by the caller. The scratch must have been built for a grid of the same
+/// node count.
+#[allow(clippy::too_many_arguments)]
+pub fn search_scratch(
+    grid: &Grid,
+    obs: &ObstacleMap,
+    net: u32,
+    starts: &[Node],
+    goals: &[Node],
+    costs: &Costs,
+    max_expansions: usize,
+    validator: Option<&EdgeValidator>,
+    scratch: &mut AStarScratch,
+) -> Option<Vec<Node>> {
     if starts.is_empty() || goals.is_empty() {
         return None;
     }
-    // Dense arrays indexed by a flat node id: far faster than hashing on a big grid.
     let n_nodes = (grid.cols * grid.rows * grid.layers as i64) as usize;
+    debug_assert_eq!(n_nodes, scratch.n_nodes, "scratch built for a different grid");
     let id = |n: Node| -> usize {
         ((n.layer as i64 * grid.cols + n.col as i64) * grid.rows + n.row as i64) as usize
     };
-    let mut g_score: Vec<i64> = vec![i64::MAX; n_nodes];
-    let mut came_from: Vec<u32> = vec![u32::MAX; n_nodes];
 
-    let mut goal_flag: Vec<bool> = vec![false; n_nodes];
+    // bump the generation; a node is "seen" this search iff gen_of[id] == generation.
+    scratch.generation = scratch.generation.wrapping_add(1);
+    let gen = scratch.generation;
+    // clear only the goal flags we set last time.
+    for &i in &scratch.touched_goals {
+        scratch.goal_flag[i] = false;
+    }
+    scratch.touched_goals.clear();
+
     for &gnode in goals {
         if grid.in_bounds(gnode) {
-            goal_flag[id(gnode)] = true;
+            let i = id(gnode);
+            scratch.goal_flag[i] = true;
+            scratch.touched_goals.push(i);
         }
     }
     let href = goals[0];
@@ -134,18 +197,26 @@ pub fn search(
             continue;
         }
         let h = heuristic(s, href, costs);
-        g_score[id(s)] = 0;
+        let i = id(s);
+        scratch.gen_of[i] = gen;
+        scratch.g_score[i] = 0;
+        scratch.came_from[i] = u32::MAX;
         open.push(HeapItem { f: h, g: 0, node: s });
     }
+
+    // current best g for a node, treating stale (old-generation) entries as infinity.
+    let g_at = |scratch: &AStarScratch, i: usize| -> i64 {
+        if scratch.gen_of[i] == gen { scratch.g_score[i] } else { i64::MAX }
+    };
 
     let mut expansions = 0usize;
     while let Some(HeapItem { f: _, g, node }) = open.pop() {
         let nid = id(node);
-        if g > g_score[nid] {
+        if g > g_at(scratch, nid) {
             continue; // stale
         }
-        if goal_flag[nid] {
-            return Some(reconstruct(&came_from, node, grid));
+        if scratch.goal_flag[nid] {
+            return Some(reconstruct_gen(scratch, node, grid, gen));
         }
         expansions += 1;
         if expansions > max_expansions {
@@ -157,15 +228,13 @@ pub fn search(
             if !obs.passable(nb, net) {
                 continue;
             }
-            // Exact-geometry gate: the trace segment swept between these two node centers
-            // must clear different-net copper. Rejects sub-cell clips the grid misses.
             if let Some(v) = validator {
                 if !v.edge_clear(node.layer, grid.point_of(node), grid.point_of(nb), net) {
                     continue;
                 }
             }
             let move_cost = if dc != 0 && dr != 0 { costs.diag } else { costs.step };
-            relax(node, nb, g + move_cost, href, costs, &id, &mut g_score, &mut came_from, &mut open);
+            relax_gen(node, nb, g + move_cost, href, costs, &id, gen, scratch, &mut open);
         }
         // layer changes (via) at the same col/row
         for layer in 0..grid.layers as u32 {
@@ -176,35 +245,36 @@ pub fn search(
             if !obs.passable(nb, net) {
                 continue;
             }
-            relax(node, nb, g + costs.via, href, costs, &id, &mut g_score, &mut came_from, &mut open);
+            relax_gen(node, nb, g + costs.via, href, costs, &id, gen, scratch, &mut open);
         }
     }
     None
 }
 
 #[allow(clippy::too_many_arguments)]
-fn relax(
+fn relax_gen(
     from: Node,
     to: Node,
     tentative_g: i64,
     href: Node,
     costs: &Costs,
     id: &impl Fn(Node) -> usize,
-    g_score: &mut [i64],
-    came_from: &mut [u32],
+    gen: u32,
+    scratch: &mut AStarScratch,
     open: &mut BinaryHeap<HeapItem>,
 ) {
     let tid = id(to);
-    if tentative_g < g_score[tid] {
-        g_score[tid] = tentative_g;
-        came_from[tid] = id(from) as u32;
+    let cur = if scratch.gen_of[tid] == gen { scratch.g_score[tid] } else { i64::MAX };
+    if tentative_g < cur {
+        scratch.gen_of[tid] = gen;
+        scratch.g_score[tid] = tentative_g;
+        scratch.came_from[tid] = id(from) as u32;
         let f = tentative_g + heuristic(to, href, costs);
         open.push(HeapItem { f, g: tentative_g, node: to });
     }
 }
 
-fn reconstruct(came_from: &[u32], goal: Node, grid: &Grid) -> Vec<Node> {
-    // decode a flat id back into a Node
+fn reconstruct_gen(scratch: &AStarScratch, goal: Node, grid: &Grid, gen: u32) -> Vec<Node> {
     let decode = |fid: u32| -> Node {
         let v = fid as i64;
         let row = v % grid.rows;
@@ -218,7 +288,11 @@ fn reconstruct(came_from: &[u32], goal: Node, grid: &Grid) -> Vec<Node> {
     let mut path = vec![goal];
     let mut cur = goal;
     loop {
-        let p = came_from[id(cur)];
+        let i = id(cur);
+        if scratch.gen_of[i] != gen {
+            break;
+        }
+        let p = scratch.came_from[i];
         if p == u32::MAX {
             break;
         }
