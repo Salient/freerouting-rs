@@ -41,6 +41,8 @@ pub struct Board {
     pub vias: Vec<Via>,
     /// Keepout regions: routing is forbidden inside these polygons on their layer(s).
     pub keepouts: Vec<Keepout>,
+    /// Net classes (DSN `(class ...)`) — net groupings with optional width/clearance rules.
+    pub net_classes: Vec<crate::net::NetClass>,
 }
 
 /// A keepout region: a polygon on a specific layer (or all layers if `layer` is None)
@@ -68,6 +70,7 @@ impl Board {
             traces: Vec::new(),
             vias: Vec::new(),
             keepouts: Vec::new(),
+            net_classes: Vec::new(),
         }
     }
 

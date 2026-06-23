@@ -67,6 +67,7 @@ pub struct App {
     show_stats_win: bool,
     show_components_win: bool,
     show_nets_win: bool,
+    show_classes_win: bool,
     show_help_win: bool,
     comp_filter: String,
     net_filter: String,
@@ -130,6 +131,7 @@ impl Default for App {
             show_stats_win: false,
             show_components_win: false,
             show_nets_win: false,
+            show_classes_win: false,
             show_help_win: false,
             comp_filter: String::new(),
             net_filter: String::new(),
@@ -386,6 +388,62 @@ impl App {
                 self.highlight_net = Some(id);
             }
             self.show_nets_win = open;
+        }
+
+        // Net classes viewer/editor: per-class trace width + clearance (in mil), and the
+        // member nets. Editing width/clearance updates the class rule (applied by the
+        // router via net_class_overrides). A class click highlights its first net.
+        if self.show_classes_win {
+            let mut open = self.show_classes_win;
+            let mut hl_name: Option<String> = None;
+            let per_unit = self.board.as_ref().map(|b| b.resolution.per_unit as f64).unwrap_or(10000.0);
+            let global_w = self.board.as_ref().map(|b| b.rules.default_width as f64 / per_unit).unwrap_or(0.0);
+            let global_c = self.board.as_ref().map(|b| b.rules.default_clearance as f64 / per_unit).unwrap_or(0.0);
+            egui::Window::new("Net classes")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([520.0, 460.0])
+                .show(ctx, |ui| {
+                    let Some(board) = self.board.as_mut() else { return };
+                    if board.net_classes.is_empty() {
+                        ui.label("This board defines no net classes.");
+                        return;
+                    }
+                    ui.label(format!("Global rule: width {global_w:.1} mil, clearance {global_c:.1} mil. Per-class values below override it (blank = global)."));
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        egui::Grid::new("netclass_grid").striped(true).num_columns(4).show(ui, |ui| {
+                            ui.strong("Class");
+                            ui.strong("Nets");
+                            ui.strong("Width (mil)");
+                            ui.strong("Clearance (mil)");
+                            ui.end_row();
+                            for class in &mut board.net_classes {
+                                if ui.selectable_label(false, &class.name).clicked() {
+                                    hl_name = class.nets.first().cloned();
+                                }
+                                ui.label(format!("{}", class.nets.len()));
+                                // width: edit in mil; store back in board units. 0 = global.
+                                let mut w_mil = class.width.map(|w| w as f64 / per_unit).unwrap_or(0.0);
+                                if ui.add(egui::DragValue::new(&mut w_mil).speed(0.5).range(0.0..=200.0)).changed() {
+                                    class.width = if w_mil > 0.0 { Some((w_mil * per_unit) as i64) } else { None };
+                                }
+                                let mut c_mil = class.clearance.map(|c| c as f64 / per_unit).unwrap_or(0.0);
+                                if ui.add(egui::DragValue::new(&mut c_mil).speed(0.5).range(0.0..=200.0)).changed() {
+                                    class.clearance = if c_mil > 0.0 { Some((c_mil * per_unit) as i64) } else { None };
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
+            // highlight the class's first net by name.
+            if let Some(net_name) = hl_name {
+                if let Some(board) = self.board.as_ref() {
+                    self.highlight_net = board.nets.index_of(&net_name);
+                }
+            }
+            self.show_classes_win = open;
         }
 
         // Help / keyboard shortcuts.
@@ -1338,6 +1396,9 @@ impl eframe::App for App {
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Nets…")).clicked() {
                     self.show_nets_win = !self.show_nets_win;
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Classes…")).clicked() {
+                    self.show_classes_win = !self.show_classes_win;
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Stats…")).clicked() {
                     self.show_stats_win = !self.show_stats_win;

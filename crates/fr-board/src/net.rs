@@ -8,6 +8,18 @@ pub struct Net {
     pub pins: Vec<String>,
 }
 
+/// A net class: a named group of nets that may share a trace width / clearance rule. From
+/// the DSN `(class ...)` scope. `width`/`clearance` are in board units; `None` means "use
+/// the board's global default rule".
+#[derive(Clone, Debug)]
+pub struct NetClass {
+    pub name: String,
+    /// Net names belonging to this class (as written in the DSN).
+    pub nets: Vec<String>,
+    pub width: Option<i64>,
+    pub clearance: Option<i64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NetSet {
     nets: Vec<Net>,

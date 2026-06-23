@@ -387,6 +387,33 @@ fn junction_vias_for(
     vias
 }
 
+/// Per-net width/clearance overrides (board units) derived from the board's net classes.
+/// Returns two vectors indexed by net id; an entry is `Some` only if a class the net
+/// belongs to sets that rule (last class with a rule wins). Nets with no class rule are
+/// `None` (caller uses the global default).
+fn net_class_overrides(board: &Board, net_count: usize) -> (Vec<Option<i64>>, Vec<Option<i64>>) {
+    let mut width = vec![None; net_count];
+    let mut clearance = vec![None; net_count];
+    for class in &board.net_classes {
+        if class.width.is_none() && class.clearance.is_none() {
+            continue;
+        }
+        for net_name in &class.nets {
+            if let Some(id) = board.nets.index_of(net_name) {
+                if id < net_count {
+                    if let Some(w) = class.width {
+                        width[id] = Some(w);
+                    }
+                    if let Some(c) = class.clearance {
+                        clearance[id] = Some(c);
+                    }
+                }
+            }
+        }
+    }
+    (width, clearance)
+}
+
 pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
     let mut idx = ObstacleIndex::new(layers);
     for pin in &board.pins {
@@ -511,6 +538,9 @@ fn route_incremental(
             }
         }
     }
+    // Per-net width/clearance overrides from net classes (board units). A net not in any
+    // class with a rule keeps the global ctx.width / ctx.clearance.
+    let (net_width, net_clearance) = net_class_overrides(board, net_count);
     let via_r = fr_route::via_radius(board, ctx.via_padstack, ctx.grid.pitch);
     let via_exact_r = fr_route::via_radius(board, ctx.via_padstack, 0).max(1);
     // Reusable A* working memory — allocated once for the whole run instead of per
@@ -541,16 +571,19 @@ fn route_incremental(
             // net doesn't leave dangling stubs blocking the retry.
             let mut produced = Vec::new();
             let mut ok = true;
+            // per-net width/clearance (net-class override, else global).
+            let net_w = net_width[net_id].unwrap_or(ctx.width).max(ctx.grid.pitch / 2);
+            let net_clr = net_clearance[net_id].unwrap_or(ctx.clearance);
             let validator = EdgeValidator {
                 index: &index,
-                half: ctx.width / 2,
-                clearance: ctx.clearance,
+                half: net_w / 2,
+                clearance: net_clr,
             };
             for (ai, bi) in mst_edges(&pin_pts) {
                 match route_connection_scratch(
                     board, ctx.grid, &obs, net_id as u32,
                     pin_pts[ai], pin_pts[bi],
-                    ctx.width, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
+                    net_w, Some(ctx.via_padstack), &ctx.costs, ctx.max_expansions,
                     Some(&validator), None, None, &mut scratch,
                 ) {
                     Some(c) => produced.push(c),

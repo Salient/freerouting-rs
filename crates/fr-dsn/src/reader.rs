@@ -46,6 +46,7 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
 
     if let Some(network) = pcb.child("network") {
         read_nets(network, &mut board);
+        board.net_classes = read_classes(network, resolution);
     }
 
     // Build real pins: for each placed component, transform its image's pin offsets by
@@ -573,6 +574,34 @@ fn read_nets(network: &Sexp, board: &mut Board) {
         }
         board.nets.add(Net { name, pins });
     }
+}
+
+/// Parse `(class NAME net1 net2 ... [(rule (width W) (clearance C))])` net-class scopes.
+/// The member net names are the class scope's bare atom args (after the class name); an
+/// optional `(rule ...)` child sets a per-class width/clearance (board units).
+fn read_classes(network: &Sexp, res: Resolution) -> Vec<fr_board::NetClass> {
+    let mut out = Vec::new();
+    for class in network.children("class") {
+        let args = class.atom_args();
+        if args.is_empty() {
+            continue;
+        }
+        let name = args[0].to_string();
+        // remaining bare atoms are member net names.
+        let nets: Vec<String> = args.iter().skip(1).map(|s| s.to_string()).collect();
+        // optional per-class rule.
+        let (mut width, mut clearance) = (None, None);
+        if let Some(rule) = class.child("rule") {
+            if let Some(w) = rule.child("width") {
+                width = w.atom_args().first().and_then(|s| parse_num(s)).map(|v| scale(v, res));
+            }
+            if let Some(c) = rule.child("clearance") {
+                clearance = c.atom_args().first().and_then(|s| parse_num(s)).map(|v| scale(v, res));
+            }
+        }
+        out.push(fr_board::NetClass { name, nets, width, clearance });
+    }
+    out
 }
 
 // --- numeric helpers ---
