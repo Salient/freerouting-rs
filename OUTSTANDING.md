@@ -12,9 +12,9 @@ panics exist in the code; the items below are missing features / approximations.
 2. ~~**Pre-existing `wiring` discarded.**~~ FIXED (commit 467d745): 5862 wires + 308 vias
    loaded as fixed copper; displayed + treated as obstacles.
 
-3. **`(plane ...)` / power-plane layers ignored.** Copper-pour planes (net-tied) aren't
-   parsed; traces could overlap a plane of another net. MEDIUM (board has planes via the
-   power layers). 
+3. ~~**`(plane ...)` / power-plane layers ignored.**~~ N/A: the real board has ZERO
+   `(plane)` scopes (verified — the earlier "planes" count was a miscount of layer `(type)`
+   tokens). No plane copper to parse. A board that uses copper pours would need this.
 
 ## Quality / completeness (works, but approximate or limited)
 
