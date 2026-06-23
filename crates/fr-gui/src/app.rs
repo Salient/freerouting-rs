@@ -56,6 +56,21 @@ pub struct App {
 
     // show the clearance keepout boundary around obstacles (copper + design clearance).
     show_clearance: bool,
+    // show DRC violation markers on the canvas
+    show_violations: bool,
+    // show keepout regions
+    show_keepouts: bool,
+
+    // info windows
+    show_incompletes_win: bool,
+    show_violations_win: bool,
+    show_stats_win: bool,
+    // cached DRC violations (recomputed on demand)
+    violations: Vec<fr_engine::Violation>,
+    // request to recenter the view on a board point (from a list click)
+    goto_point: Option<Point>,
+    // cursor position in board units (for the status bar)
+    cursor_pos: Option<Point>,
 
     // file browser
     show_browser: bool,
@@ -103,6 +118,14 @@ impl Default for App {
             active_layer: 0,
             fade_inactive: true,
             show_clearance: false,
+            show_violations: false,
+            show_keepouts: true,
+            show_incompletes_win: false,
+            show_violations_win: false,
+            show_stats_win: false,
+            violations: Vec::new(),
+            goto_point: None,
+            cursor_pos: None,
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
@@ -205,6 +228,117 @@ impl App {
             board.traces.len(), board.vias.len(), report.unrouted_nets.len()
         );
         self.last_report = Some(report);
+    }
+
+    /// Recompute the cached DRC violation list from the current board.
+    fn recompute_violations(&mut self) {
+        self.violations = self
+            .board
+            .as_ref()
+            .map(fr_engine::drc_violations)
+            .unwrap_or_default();
+    }
+
+    /// Info windows: incompletes (unrouted nets), DRC violations, board statistics. Each
+    /// list is clickable to recenter the view on the item (set goto_point).
+    fn info_windows(&mut self, ctx: &egui::Context) {
+        let per_unit = self.board.as_ref().map(|b| b.resolution.per_unit as f64).unwrap_or(1.0);
+
+        // Incompletes: unrouted nets and their ratsnest airlines.
+        if self.show_incompletes_win {
+            let mut open = self.show_incompletes_win;
+            let mut goto: Option<Point> = None;
+            egui::Window::new("Incompletes (unrouted nets)")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([420.0, 420.0])
+                .show(ctx, |ui| {
+                    if let (Some(board), Some(rep)) = (&self.board, &self.last_report) {
+                        ui.label(format!("{} unrouted of {} nets", rep.unrouted_nets.len(), rep.nets_total));
+                        ui.separator();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for &nid in &rep.unrouted_nets {
+                                let name = board.nets.get(nid).map(|n| n.name.as_str()).unwrap_or("?");
+                                let airlines = net_ratsnest(board, nid);
+                                let label = format!("{name}  ({} airline(s))", airlines.len());
+                                if ui.selectable_label(false, label).clicked() {
+                                    if let Some((a, _b)) = airlines.first() {
+                                        goto = Some(*a);
+                                    }
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label("Route the board first (▶ Route) to see incompletes.");
+                    }
+                });
+            if goto.is_some() {
+                self.goto_point = goto;
+            }
+            self.show_incompletes_win = open;
+        }
+
+        // DRC violations list.
+        if self.show_violations_win {
+            let mut open = self.show_violations_win;
+            let mut goto: Option<Point> = None;
+            egui::Window::new(format!("DRC violations ({})", self.violations.len()))
+                .open(&mut open)
+                .resizable(true)
+                .default_size([460.0, 420.0])
+                .show(ctx, |ui| {
+                    if self.violations.is_empty() {
+                        ui.label("No DRC violations. 🎉");
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (i, v) in self.violations.iter().enumerate() {
+                                let label = format!(
+                                    "{}. {} (layer {}) @ ({:.1}, {:.1}) mil",
+                                    i + 1, v.kind, v.layer,
+                                    v.location.x as f64 / per_unit, v.location.y as f64 / per_unit
+                                );
+                                if ui.selectable_label(false, label).clicked() {
+                                    goto = Some(v.location);
+                                }
+                            }
+                        });
+                    }
+                });
+            if goto.is_some() {
+                self.goto_point = goto;
+                self.show_violations = true;
+            }
+            self.show_violations_win = open;
+        }
+
+        // Board statistics.
+        if self.show_stats_win {
+            let mut open = self.show_stats_win;
+            egui::Window::new("Board statistics")
+                .open(&mut open)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    if let Some(board) = &self.board {
+                        ui.monospace(format!("name:        {}", board.name));
+                        ui.monospace(format!("layers:      {}", board.layer_count()));
+                        ui.monospace(format!("nets:        {}", board.nets.len()));
+                        ui.monospace(format!("components:  {}", board.components.len()));
+                        ui.monospace(format!("pins:        {}", board.pins.len()));
+                        ui.monospace(format!("padstacks:   {}", board.padstacks.len()));
+                        ui.monospace(format!("keepouts:    {}", board.keepouts.len()));
+                        ui.monospace(format!("traces:      {}", board.traces.len()));
+                        ui.monospace(format!("vias:        {}", board.vias.len()));
+                        if let Some(rep) = &self.last_report {
+                            ui.separator();
+                            ui.monospace(format!("routed:      {}/{} nets", rep.nets_completed, rep.nets_total));
+                            ui.monospace(format!("incomplete:  {}", rep.unrouted_nets.len()));
+                        }
+                    } else {
+                        ui.label("No board loaded.");
+                    }
+                });
+            self.show_stats_win = open;
+        }
     }
 
     /// Ensure the interactive router exists (rebuilt from the current board on demand).
@@ -318,6 +452,30 @@ impl App {
             }
         }
         (p, self.active_layer, 0)
+    }
+
+    /// Delete a picked trace or via (pads are footprint copper, not deletable). Snapshots
+    /// for undo and invalidates the router/selection.
+    fn delete_pick(&mut self, pick: crate::picking::Pick) {
+        self.push_undo();
+        if let Some(board) = self.board.as_mut() {
+            match pick {
+                crate::picking::Pick::Trace { index } if index < board.traces.len() => {
+                    board.traces.remove(index);
+                    self.status = "Deleted trace.".into();
+                }
+                crate::picking::Pick::Via { index } if index < board.vias.len() => {
+                    board.vias.remove(index);
+                    self.status = "Deleted via.".into();
+                }
+                _ => {}
+            }
+        }
+        self.router = None;
+        self.last_report = None;
+        if self.show_violations {
+            self.recompute_violations();
+        }
     }
 
     /// Finish/cancel the in-progress manual route.
@@ -436,8 +594,14 @@ impl App {
                     view.zoom_at((scroll as f64 * 0.002).exp(), anchor, screen);
                 }
             }
+            // recenter on a requested point (from an info-list click)
+            if let Some(p) = self.goto_point.take() {
+                view.center = p;
+            }
         }
         let view_ro = *self.view.as_ref().unwrap();
+        // track the cursor position (board units) for the status bar.
+        self.cursor_pos = resp.hover_pos().map(|hp| view_ro.to_board(hp, screen));
 
         // Hit-test under the cursor (within a few-pixel tolerance, converted to board
         // units). Used for the hover tooltip and click selection. A drag is a pan, not a
@@ -491,6 +655,30 @@ impl App {
                     [edge[i], edge[(i + 1) % edge.len()]],
                     Stroke::new(2.0, Self::C_OUTLINE),
                 );
+            }
+        }
+
+        // keepout regions: hatched-look translucent fill + dashed outline (Java keepout
+        // color, teal-ish), so the user sees where routing is forbidden.
+        if self.show_keepouts {
+            let ko_fill = Color32::from_rgba_unmultiplied(26, 196, 210, 28);
+            let ko_edge = Color32::from_rgba_unmultiplied(26, 196, 210, 160);
+            for ko in &board.keepouts {
+                if ko.polygon.len() < 3 {
+                    continue;
+                }
+                for tri in crate::padgeom::triangulate(&ko.polygon) {
+                    let mut mesh = egui::epaint::Mesh::default();
+                    for &vi in &tri {
+                        mesh.colored_vertex(view_ro.to_screen(ko.polygon[vi], screen), ko_fill);
+                    }
+                    mesh.add_triangle(0, 1, 2);
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+                let pts: Vec<Pos2> = ko.polygon.iter().map(|&p| view_ro.to_screen(p, screen)).collect();
+                for i in 0..pts.len() {
+                    painter.line_segment([pts[i], pts[(i + 1) % pts.len()]], Stroke::new(1.0, ko_edge));
+                }
             }
         }
 
@@ -625,6 +813,16 @@ impl App {
             let dim = self.highlight_net.is_some() && v.net != self.highlight_net;
             let col = if dim { Color32::from_gray(120) } else { Self::C_PAD };
             painter.circle_stroke(c, 3.0, Stroke::new(1.5, col));
+        }
+
+        // DRC violation markers (magenta crosses) when enabled.
+        if self.show_violations {
+            for v in &self.violations {
+                let c = view_ro.to_screen(v.location, screen);
+                let m = Color32::from_rgb(255, 0, 255);
+                painter.line_segment([c + egui::vec2(-5.0, -5.0), c + egui::vec2(5.0, 5.0)], Stroke::new(1.5, m));
+                painter.line_segment([c + egui::vec2(-5.0, 5.0), c + egui::vec2(5.0, -5.0)], Stroke::new(1.5, m));
+            }
         }
 
         // selection highlight (cyan): outline the currently-selected item.
@@ -998,6 +1196,27 @@ impl eframe::App for App {
                 if ui.add_enabled(has_board, egui::Button::new("Export SES")).clicked() {
                     self.export("ses");
                 }
+                ui.separator();
+                // display toggles + info windows (Java toolbar parity).
+                if ui.add_enabled(has_board, egui::Button::new("Ratsnest").selected(self.show_ratsnest)).clicked() {
+                    self.show_ratsnest = !self.show_ratsnest;
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Violations").selected(self.show_violations)).clicked() {
+                    self.show_violations = !self.show_violations;
+                    if self.show_violations {
+                        self.recompute_violations();
+                    }
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Incompletes…")).clicked() {
+                    self.show_incompletes_win = !self.show_incompletes_win;
+                }
+                if ui.add_enabled(has_board, egui::Button::new("DRC…")).clicked() {
+                    self.show_violations_win = !self.show_violations_win;
+                    self.recompute_violations();
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Stats…")).clicked() {
+                    self.show_stats_win = !self.show_stats_win;
+                }
                 if !self.warnings.is_empty() {
                     ui.separator();
                     // warning button with a count badge; amber so it stands out.
@@ -1009,6 +1228,8 @@ impl eframe::App for App {
                 }
             });
         });
+
+        self.info_windows(ctx);
 
         // Warnings window: the DSN-load warnings (missing images, shapeless padstacks,
         // unparsed shapes, …). Toggled from the toolbar.
@@ -1047,6 +1268,8 @@ impl eframe::App for App {
                     ui.checkbox(&mut self.show_pads, "Pads");
                     ui.checkbox(&mut self.fade_inactive, "Fade inactive layers");
                     ui.checkbox(&mut self.show_clearance, "Clearance halos (always)");
+                    ui.checkbox(&mut self.show_keepouts, "Keepouts");
+                    ui.checkbox(&mut self.show_violations, "DRC violation markers");
                     if self.highlight_net.is_some() && ui.button("Clear highlight").clicked() {
                         self.highlight_net = None;
                     }
@@ -1087,6 +1310,7 @@ impl eframe::App for App {
                 // Selection info: details of the clicked item, with actions.
                 let mut do_highlight_net: Option<usize> = None;
                 let mut do_clear_selection = false;
+                let mut do_delete: Option<crate::picking::Pick> = None;
                 if let (Some(board), Some(sel)) = (&self.board, self.selected) {
                     let info = Self::pick_info(board, sel);
                     let net = match sel {
@@ -1097,11 +1321,16 @@ impl eframe::App for App {
                         crate::picking::Pick::Pad { pin_index } =>
                             board.pins.get(pin_index).and_then(|p| p.net),
                     };
+                    let is_pad = matches!(sel, crate::picking::Pick::Pad { .. });
                     ui.collapsing("Selection", |ui| {
                         ui.label(info);
                         ui.horizontal(|ui| {
                             if net.is_some() && ui.button("Highlight net").clicked() {
                                 do_highlight_net = net;
+                            }
+                            // a pad is part of the footprint, not deletable; traces/vias are.
+                            if !is_pad && ui.button("🗑 Delete").clicked() {
+                                do_delete = Some(sel);
                             }
                             if ui.button("Clear selection").clicked() {
                                 do_clear_selection = true;
@@ -1111,6 +1340,10 @@ impl eframe::App for App {
                 }
                 if do_highlight_net.is_some() {
                     self.highlight_net = do_highlight_net;
+                }
+                if let Some(sel) = do_delete {
+                    self.delete_pick(sel);
+                    do_clear_selection = true;
                 }
                 if do_clear_selection {
                     self.selected = None;
@@ -1162,7 +1395,21 @@ impl eframe::App for App {
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.label(&self.status);
+            ui.horizontal(|ui| {
+                ui.label(&self.status);
+                // right-aligned: active layer + cursor coordinates (in mil), like Java.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let (Some(board), Some(p)) = (&self.board, self.cursor_pos) {
+                        let per = board.resolution.per_unit as f64;
+                        ui.monospace(format!("({:.1}, {:.1}) mil", p.x as f64 / per, p.y as f64 / per));
+                        ui.separator();
+                    }
+                    if let Some(board) = &self.board {
+                        let lname = board.layers.layers().get(self.active_layer).map(|l| l.name.as_str()).unwrap_or("?");
+                        ui.monospace(format!("layer: {} ({})", self.active_layer, lname));
+                    }
+                });
+            });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {

@@ -208,6 +208,79 @@ pub fn drc_trace_pin_short_count(board: &Board) -> usize {
 }
 
 
+/// A DRC violation with a location, for the GUI violations list (zoom-to).
+#[derive(Clone, Debug)]
+pub struct Violation {
+    pub location: Point,
+    pub layer: usize,
+    pub kind: String,
+}
+
+/// All copper-clearance violations (trace-trace overlaps + trace-pin shorts) with their
+/// locations, for display. O(n^2)-ish via the same bucketing the counts use; intended for
+/// interactive use after routing, not the hot path.
+pub fn drc_violations(board: &Board) -> Vec<Violation> {
+    let segs = flatten_segments(board);
+    let mut out = Vec::new();
+    // trace-trace overlaps
+    use std::collections::HashMap;
+    let bucket = (board.rules.default_width + board.rules.default_clearance).max(1) * 4;
+    let mut grid: HashMap<(usize, i64, i64), Vec<usize>> = HashMap::new();
+    for (i, s) in segs.iter().enumerate() {
+        let minx = s.a.x.min(s.b.x).div_euclid(bucket);
+        let maxx = s.a.x.max(s.b.x).div_euclid(bucket);
+        let miny = s.a.y.min(s.b.y).div_euclid(bucket);
+        let maxy = s.a.y.max(s.b.y).div_euclid(bucket);
+        for cx in minx..=maxx {
+            for cy in miny..=maxy {
+                grid.entry((s.layer, cx, cy)).or_default().push(i);
+            }
+        }
+    }
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    for ids in grid.values() {
+        for (xi, &i) in ids.iter().enumerate() {
+            for &j in &ids[xi + 1..] {
+                let (si, sj) = (&segs[i], &segs[j]);
+                if si.net == sj.net || si.layer != sj.layer {
+                    continue;
+                }
+                let pair = (i.min(j), i.max(j));
+                if !seen.insert(pair) {
+                    continue;
+                }
+                if seg_seg_dist(si.a, si.b, sj.a, sj.b) < si.half + sj.half - 1.0 {
+                    let loc = Point::new((si.a.x + sj.a.x) / 2, (si.a.y + sj.a.y) / 2);
+                    out.push(Violation { location: loc, layer: si.layer, kind: "trace-trace short".into() });
+                }
+            }
+        }
+    }
+    // trace-pin shorts
+    for pin in &board.pins {
+        let Some(ps) = board.padstacks.get(pin.padstack) else { continue };
+        if ps.is_empty() {
+            continue;
+        }
+        let pin_net = pin.net.unwrap_or(usize::MAX);
+        let pad_r = ps.shapes.iter().filter_map(|s| pad_shape_extent(s.as_ref())).fold(0i64, i64::max) as f64;
+        let (lo, hi) = (ps.from_layer().unwrap_or(0), ps.to_layer().unwrap_or(0));
+        for s in &segs {
+            if s.net == pin_net || s.layer < lo || s.layer > hi {
+                continue;
+            }
+            if point_seg_dist(pin.location, s.a, s.b) < pad_r + s.half - 1.0 {
+                out.push(Violation {
+                    location: pin.location,
+                    layer: s.layer,
+                    kind: format!("trace near pad {}-{}", pin.component, pin.name),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Per-run routing context shared across nets (immutable).
 struct RouteCtx<'a> {
     grid: &'a Grid,
