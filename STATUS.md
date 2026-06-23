@@ -23,13 +23,19 @@ Fixed from user feedback + autonomous work (all committed, 19 workspace test blo
 - Triage of all remaining work in OUTSTANDING.md. Single unified binary
   `freerouting-rs-gui` (GUI default, --headless / --render).
 
-## How to resume
+## How to resume (fresh instance)
 
-1. Read `../freerouting-rs-spec/{README,REQUIREMENTS,ARCHITECTURE,ALGORITHM,ALTIUM_COMPAT,MILESTONES}.md`.
-2. Read this file for current state.
-3. `cd /home/jheller2/Projects/freerouting-rs && cargo test` — everything green except
-   what's noted below.
-4. Continue from "Next steps".
+1. Project root: `/home/derp/Projects/freerouting-rs`. Rust is NOT preinstalled — run
+   `. "$HOME/.cargo/env"` before any cargo command (see the [[env-fresh-machine]] memory).
+   The sibling `../freerouting-rs-spec/` does NOT exist on this machine; the Java oracle to
+   port from is `/home/derp/Projects/freerouting/src_v19/...`.
+2. Read the memory files (auto-loaded) — START with `overnight-session-state` and
+   `rejected-approaches`. Read this STATUS.md + `OUTSTANDING.md` for current state + next
+   steps, and `crates/fr-route/ROOMDOOR_DESIGN.md` for the room/door model.
+3. `cargo test --workspace` — 19 test blocks green (fr-gui is excluded; build/test it from
+   `crates/fr-gui`). Some DRC tests take ~75s in debug (fine).
+4. Continue from "Still open" in OUTSTANDING.md — top item is making the room/door model
+   the default batch router.
 
 ## Environment (verified working)
 
