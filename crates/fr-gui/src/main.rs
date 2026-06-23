@@ -184,10 +184,24 @@ fn run_render(cli: &Cli, out: &PathBuf) -> anyhow::Result<()> {
 
 /// Launch the interactive GUI, optionally opening `input` on start.
 fn run_gui(input: Option<PathBuf>) -> anyhow::Result<()> {
+    // Robust wgpu config for headless/WSLg stacks: FIFO present mode is universally
+    // supported (the default AutoVsync can request a mode the WSLg surface rejects with
+    // "surface isn't supported by this adapter"), low-power prefers the software/lavapipe
+    // adapter, and a skip-frame surface-error handler avoids a hard panic on a transient
+    // surface loss (e.g. a display hiccup or a second instance grabbing the surface).
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    wgpu_options.present_mode = eframe::wgpu::PresentMode::Fifo;
+    wgpu_options.power_preference = eframe::wgpu::PowerPreference::LowPower;
+    wgpu_options.on_surface_error = std::sync::Arc::new(|err| {
+        eprintln!("wgpu surface error (skipping frame): {err:?}");
+        eframe::egui_wgpu::SurfaceErrorAction::SkipFrame
+    });
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_title("freerouting-rs"),
+        wgpu_options,
         ..Default::default()
     };
     eframe::run_native(
