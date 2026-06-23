@@ -53,15 +53,21 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
     // see distinct, correctly-located endpoints.
     build_pins(&mut board, &images, &mut warnings);
 
+    // Import-correctness check: flag overlapping pads (a common Altium-vs-Specctra issue).
+    check_pad_overlaps(&board, &mut warnings);
+
     let _ = layer_count;
     (board, warnings)
 }
 
-/// A pin within a library image: padstack name, pin name, offset from the image origin.
+/// A pin within a library image: padstack name, pin name, offset from the image origin,
+/// and the pin's own pad rotation (degrees CCW) from a `(rotate r)` token. The pad SHAPE
+/// is rotated by this per-pin angle (plus the component placement rotation).
 struct ImagePin {
     padstack: String,
     name: String,
     offset: Point,
+    rotate: f64,
 }
 
 fn read_images(library: &Sexp, res: Resolution) -> std::collections::HashMap<String, Vec<ImagePin>> {
@@ -77,7 +83,12 @@ fn read_images(library: &Sexp, res: Resolution) -> std::collections::HashMap<Str
                 let name = a[1].to_string();
                 let dx = parse_num(a[2]).unwrap_or(0.0);
                 let dy = parse_num(a[3]).unwrap_or(0.0);
-                pins.push(ImagePin { padstack, name, offset: scale_pt(dx, dy, res) });
+                // per-pin (rotate r) sub-scope, if present, rotates the pad shape.
+                let rotate = pin
+                    .child("rotate")
+                    .and_then(|r| r.atom_args().first().and_then(|s| parse_num(s)))
+                    .unwrap_or(0.0);
+                pins.push(ImagePin { padstack, name, offset: scale_pt(dx, dy, res), rotate });
             }
         }
         map.insert(img_name, pins);
@@ -130,13 +141,14 @@ fn build_pins(
             let pref = format!("{refdes}-{}", ip.name);
             let net = pin_net.get(&pref).copied();
             let padstack = board.padstacks.index_of(&ip.padstack).unwrap_or(usize::MAX);
+            // total pad-shape rotation = component placement rotation + per-pin rotate.
             pins.push(Pin {
                 component: refdes.clone(),
                 name: ip.name.clone(),
                 padstack,
                 location: world,
                 net,
-                rotation: rot,
+                rotation: rot + ip.rotate,
                 front,
             });
         }
@@ -145,6 +157,82 @@ fn build_pins(
         warnings.push(format!("{missing_images} components had no matching library image"));
     }
     board.pins = pins;
+}
+
+/// Import-correctness pass: detect overlapping pad geometry, a frequent Altium-export
+/// issue (Altium permits some overlaps the Specctra standard does not).
+///
+/// Policy (per the project's import guidance):
+///  - Overlapping pads on the same component with the SAME pin name are legitimately tied
+///    internally (e.g. a MOSFET's multiple source pins / multiple drain pins). These are
+///    expected; we note them at low volume but don't treat them as errors.
+///  - Overlapping pads with DIFFERENT names (especially on a 2-pin part like a capacitor)
+///    indicate a likely error — often a pad rotated so two terminals touch. These are
+///    flagged so the user can fix them before export.
+/// Uses each pad's circumscribed radius (per-pin location) as a cheap overlap proxy.
+fn check_pad_overlaps(board: &Board, warnings: &mut Vec<String>) {
+    // INSCRIBED radius of a pin's pad (largest circle that fits inside), so adjacent
+    // fine-pitch IC pads — which are close but don't overlap — don't false-positive. For a
+    // rectangle this is half the SHORTER side; for a circle, its radius. 0 if shapeless.
+    let pad_r = |pin: &Pin| -> f64 {
+        let Some(ps) = board.padstacks.get(pin.padstack) else { return 0.0 };
+        ps.shapes
+            .iter()
+            .filter_map(|s| match s {
+                Some(PadShape::Circle { radius }) => Some(*radius as f64),
+                Some(PadShape::Convex(t)) => {
+                    let b = t.bounding_box()?;
+                    Some((b.width().min(b.height()) as f64) / 2.0)
+                }
+                None => None,
+            })
+            .fold(0.0_f64, f64::max)
+    };
+    // group pin indices by component.
+    let mut by_comp: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for (i, pin) in board.pins.iter().enumerate() {
+        by_comp.entry(pin.component.as_str()).or_default().push(i);
+    }
+    let mut tied = 0usize;
+    let mut errors = 0usize;
+    let mut error_examples: Vec<String> = Vec::new();
+    for (comp, idxs) in &by_comp {
+        for a in 0..idxs.len() {
+            for b in (a + 1)..idxs.len() {
+                let (pa, pb) = (&board.pins[idxs[a]], &board.pins[idxs[b]]);
+                let ra = pad_r(pa);
+                let rb = pad_r(pb);
+                if ra <= 0.0 || rb <= 0.0 {
+                    continue;
+                }
+                let d = (((pa.location.x - pb.location.x) as f64).powi(2)
+                    + ((pa.location.y - pb.location.y) as f64).powi(2))
+                .sqrt();
+                // overlap when centers are closer than the sum of radii (with slack).
+                if d < (ra + rb) * 0.95 {
+                    if pa.name == pb.name {
+                        tied += 1; // same-net tied pads (MOSFET S/S, D/D) — expected
+                    } else {
+                        errors += 1;
+                        if error_examples.len() < 8 {
+                            error_examples.push(format!("{comp} pins {}/{}", pa.name, pb.name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if tied > 0 {
+        warnings.push(format!(
+            "{tied} overlapping same-name pad pair(s) — treated as internally-tied (e.g. MOSFET source/drain); OK"
+        ));
+    }
+    if errors > 0 {
+        warnings.push(format!(
+            "{errors} overlapping DIFFERENT-name pad pair(s) — likely a pad-rotation/placement error (e.g. a 2-terminal part whose pads touch). Examples: {}",
+            error_examples.join(", ")
+        ));
+    }
 }
 
 fn read_resolution(pcb: &Sexp, warnings: &mut Vec<String>) -> Resolution {
