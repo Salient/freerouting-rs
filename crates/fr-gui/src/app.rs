@@ -65,6 +65,10 @@ pub struct App {
     show_incompletes_win: bool,
     show_violations_win: bool,
     show_stats_win: bool,
+    show_components_win: bool,
+    show_nets_win: bool,
+    comp_filter: String,
+    net_filter: String,
     // cached DRC violations (recomputed on demand)
     violations: Vec<fr_engine::Violation>,
     // request to recenter the view on a board point (from a list click)
@@ -123,6 +127,10 @@ impl Default for App {
             show_incompletes_win: false,
             show_violations_win: false,
             show_stats_win: false,
+            show_components_win: false,
+            show_nets_win: false,
+            comp_filter: String::new(),
+            net_filter: String::new(),
             violations: Vec::new(),
             goto_point: None,
             cursor_pos: None,
@@ -309,6 +317,70 @@ impl App {
                 self.show_violations = true;
             }
             self.show_violations_win = open;
+        }
+
+        // Components browser: click to recenter on the component.
+        if self.show_components_win {
+            let mut open = self.show_components_win;
+            let mut goto: Option<Point> = None;
+            egui::Window::new("Components")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([320.0, 460.0])
+                .show(ctx, |ui| {
+                    if let Some(board) = &self.board {
+                        ui.add(egui::TextEdit::singleline(&mut self.comp_filter).hint_text("filter…").desired_width(220.0));
+                        ui.separator();
+                        let filt = self.comp_filter.to_ascii_lowercase();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for c in &board.components {
+                                if !filt.is_empty() && !c.name.to_ascii_lowercase().contains(&filt) {
+                                    continue;
+                                }
+                                let label = format!("{}  [{}]", c.name, c.image);
+                                if ui.selectable_label(false, label).clicked() {
+                                    goto = Some(c.location);
+                                }
+                            }
+                        });
+                    }
+                });
+            if goto.is_some() {
+                self.goto_point = goto;
+            }
+            self.show_components_win = open;
+        }
+
+        // Nets list: click to highlight the whole net.
+        if self.show_nets_win {
+            let mut open = self.show_nets_win;
+            let mut hl: Option<usize> = None;
+            egui::Window::new("Nets")
+                .open(&mut open)
+                .resizable(true)
+                .default_size([300.0, 460.0])
+                .show(ctx, |ui| {
+                    if let Some(board) = &self.board {
+                        ui.add(egui::TextEdit::singleline(&mut self.net_filter).hint_text("filter…").desired_width(220.0));
+                        ui.separator();
+                        let filt = self.net_filter.to_ascii_lowercase();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (id, net) in board.nets.iter() {
+                                if !filt.is_empty() && !net.name.to_ascii_lowercase().contains(&filt) {
+                                    continue;
+                                }
+                                let selected = self.highlight_net == Some(id);
+                                if ui.selectable_label(selected, &net.name).clicked() {
+                                    hl = Some(id);
+                                }
+                            }
+                        });
+                    }
+                });
+            if let Some(id) = hl {
+                self.highlight_net = Some(id);
+            }
+            self.show_nets_win = open;
         }
 
         // Board statistics.
@@ -1213,6 +1285,12 @@ impl eframe::App for App {
                 if ui.add_enabled(has_board, egui::Button::new("DRC…")).clicked() {
                     self.show_violations_win = !self.show_violations_win;
                     self.recompute_violations();
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Components…")).clicked() {
+                    self.show_components_win = !self.show_components_win;
+                }
+                if ui.add_enabled(has_board, egui::Button::new("Nets…")).clicked() {
+                    self.show_nets_win = !self.show_nets_win;
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Stats…")).clicked() {
                     self.show_stats_win = !self.show_stats_win;
