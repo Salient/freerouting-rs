@@ -29,6 +29,21 @@ impl PadDraw {
     }
 }
 
+/// Rotate a pad-relative offset by `deg` degrees CCW, then mirror X for a back-side
+/// component (matches the DSN reader's pin-offset transform, so pad shapes orient the same
+/// way the pin positions do).
+fn orient_offset(off: Point, deg: f64, front: bool) -> Point {
+    let r = deg.to_radians();
+    let (s, c) = r.sin_cos();
+    let (ox, oy) = (off.x as f64, off.y as f64);
+    let mut x = ox * c - oy * s;
+    let y = ox * s + oy * c;
+    if !front {
+        x = -x;
+    }
+    Point::new(x.round() as i64, y.round() as i64)
+}
+
 /// The visible pad footprint of `pin` (its largest copper shape across all layers),
 /// translated to absolute board coordinates. Returns None for a shapeless padstack.
 pub fn pin_pad_shape(board: &Board, pin: &Pin) -> Option<PadDraw> {
@@ -41,10 +56,16 @@ pub fn pin_pad_shape(board: &Board, pin: &Pin) -> Option<PadDraw> {
         let draw = match shape {
             PadShape::Circle { radius } => PadDraw::Circle { center: pin.location, radius: *radius },
             PadShape::Convex(tile) => {
+                // orient the pad shape by the component's rotation + side, then translate
+                // to the pin location, so rectangular/polygon pads on rotated/back-side
+                // components (e.g. C152, U99) draw in their true orientation.
                 let verts: Vec<Point> = tile
                     .vertices()
                     .iter()
-                    .map(|&v| Point::new(pin.location.x + v.x, pin.location.y + v.y))
+                    .map(|&v| {
+                        let t = orient_offset(v, pin.rotation, pin.front);
+                        Point::new(pin.location.x + t.x, pin.location.y + t.y)
+                    })
                     .collect();
                 if verts.len() < 3 {
                     continue;
@@ -191,6 +212,8 @@ mod tests {
             padstack: idx,
             location: Point::new(1000, 2000),
             net: Some(0),
+            rotation: 0.0,
+            front: true,
         };
         (b, pin)
     }

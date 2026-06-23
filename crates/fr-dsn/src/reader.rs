@@ -136,6 +136,8 @@ fn build_pins(
                 padstack,
                 location: world,
                 net,
+                rotation: rot,
+                front,
             });
         }
     }

@@ -45,17 +45,24 @@ impl Image {
     }
 }
 
+/// Per-layer trace color, matching the Java freerouting default scheme (see app.rs).
 fn layer_color(layer: usize) -> [u8; 4] {
-    const PALETTE: [[u8; 4]; 6] = [
-        [220, 60, 60, 255], [60, 140, 220, 255], [80, 200, 100, 255],
-        [220, 180, 60, 255], [200, 100, 220, 255], [60, 200, 200, 255],
-    ];
-    PALETTE[layer % PALETTE.len()]
+    match layer {
+        0 => [200, 52, 52, 255],
+        1 => [77, 127, 196, 255],
+        _ => {
+            const INNER: [[u8; 4]; 6] = [
+                [40, 204, 217, 255], [127, 200, 127, 255], [206, 125, 44, 255],
+                [79, 203, 203, 255], [219, 98, 139, 255], [167, 165, 198, 255],
+            ];
+            INNER[layer % 6]
+        }
+    }
 }
 
 /// Render the board into a new image of the given size.
 pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
-    let bg = [20, 24, 20, 255];
+    let bg = [0, 16, 35, 255]; // Java background
     let mut img = Image::new(width, height, bg);
 
     let bounds = board
@@ -71,7 +78,7 @@ pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
 
     // board outline: filled substrate (concave-safe) + edge stroke.
     if board.outline.len() >= 3 {
-        let fill = [20, 56, 44, 255];
+        let fill = [10, 30, 58, 255];
         for tri in crate::padgeom::triangulate(&board.outline) {
             fill_triangle(
                 &mut img,
@@ -84,7 +91,7 @@ pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
         for i in 0..board.outline.len() {
             let a = to_px(board.outline[i]);
             let b = to_px(board.outline[(i + 1) % board.outline.len()]);
-            draw_line(&mut img, a, b, [120, 200, 170, 255]);
+            draw_line(&mut img, a, b, [100, 150, 255, 255]);
         }
     }
     // pads: real per-layer copper geometry, scaled.
@@ -93,13 +100,13 @@ pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
             Some(crate::padgeom::PadDraw::Circle { center, radius }) => {
                 let (x, y) = to_px(center);
                 let r = ((radius as f64 * vt.scale).round() as i32).max(1);
-                fill_circle(&mut img, x, y, r, [170, 160, 90, 255]);
+                fill_circle(&mut img, x, y, r, [227, 183, 46, 255]);
             }
             Some(crate::padgeom::PadDraw::Poly(verts)) => {
                 let px: Vec<(i32, i32)> = verts.iter().map(|&p| to_px(p)).collect();
                 // fan triangulation is fine here (pad polygons are convex)
                 for i in 1..px.len().saturating_sub(1) {
-                    fill_triangle(&mut img, px[0], px[i], px[i + 1], [170, 160, 90, 255]);
+                    fill_triangle(&mut img, px[0], px[i], px[i + 1], [227, 183, 46, 255]);
                 }
             }
             None => {}
@@ -115,7 +122,7 @@ pub fn render_board(board: &Board, width: u32, height: u32) -> Image {
     // vias
     for v in &board.vias {
         let (x, y) = to_px(v.location);
-        draw_dot(&mut img, x, y, 2, [255, 255, 255, 255]);
+        draw_dot(&mut img, x, y, 2, [227, 183, 46, 255]);
     }
     img
 }

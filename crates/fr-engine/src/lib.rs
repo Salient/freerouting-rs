@@ -239,6 +239,40 @@ fn pad_shape_extent(shape: Option<&PadShape>) -> Option<i64> {
     }
 }
 
+/// Vias needed to join a net's independently-routed connections where their trace
+/// endpoints coincide in (x,y) but on different layers. For each such junction point we
+/// emit ONE through via. Endpoints are trace first/last corners (where MST edges meet at
+/// pins or each other). Returns the vias to add for `net`.
+fn junction_vias_for(
+    produced: &[fr_route::RoutedConnection],
+    via_padstack: usize,
+    net: usize,
+) -> Vec<fr_board::Via> {
+    use std::collections::HashMap;
+    // map endpoint (x,y) -> set of layers that have a trace endpoint there.
+    let mut by_point: HashMap<(i64, i64), std::collections::BTreeSet<usize>> = HashMap::new();
+    for c in produced {
+        for t in &c.traces {
+            if let (Some(first), Some(last)) = (t.corners.first(), t.corners.last()) {
+                by_point.entry((first.x, first.y)).or_default().insert(t.layer);
+                by_point.entry((last.x, last.y)).or_default().insert(t.layer);
+            }
+        }
+    }
+    let mut vias = Vec::new();
+    for ((x, y), layers) in by_point {
+        if layers.len() >= 2 {
+            vias.push(fr_board::Via {
+                padstack: via_padstack,
+                location: Point::new(x, y),
+                net: Some(net),
+                fixed: fr_board::FixedState::Route,
+            });
+        }
+    }
+    vias
+}
+
 pub fn build_obstacle_index(board: &Board, layers: usize) -> ObstacleIndex {
     let mut idx = ObstacleIndex::new(layers);
     for pin in &board.pins {
@@ -366,6 +400,12 @@ fn route_incremental(
             // discarded entirely (no dangling/isolated stubs on the board) and retried
             // next pass. This is the "drop partial nets" policy.
             if ok {
+                // Independently-routed MST edges of a net may meet at a shared pin on
+                // DIFFERENT layers (each edge's A* picks its own layer), leaving the net
+                // electrically broken there with no via. Find every point where this net's
+                // trace endpoints land on >1 layer and add a connecting via, so multi-layer
+                // nets are actually joined.
+                let junction_vias = junction_vias_for(&produced, ctx.via_padstack, net_id);
                 for c in &produced {
                     for t in &c.traces {
                         obs.stamp_trace(t.layer, &t.corners, t.width, net_id as u32);
@@ -376,11 +416,16 @@ fn route_incremental(
                         index.add_via(0, ctx.grid.layers - 1, v.location, via_exact_r, net_id as u32);
                     }
                 }
+                for v in &junction_vias {
+                    obs.stamp_via(v.location, via_r, net_id as u32);
+                    index.add_via(0, ctx.grid.layers - 1, v.location, via_exact_r, net_id as u32);
+                }
                 report.connections_routed += produced.len();
                 for c in produced {
                     board.traces.extend(c.traces);
                     board.vias.extend(c.vias);
                 }
+                board.vias.extend(junction_vias);
                 completed[net_id] = true;
                 progressed = true;
             } else {
@@ -432,6 +477,8 @@ fn ensure_pins(board: &mut Board) {
                         padstack: pin_pad,
                         location: *loc,
                         net: Some(net_id),
+                        rotation: 0.0,
+                        front: true,
                     });
                 }
             }

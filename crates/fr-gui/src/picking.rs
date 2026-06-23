@@ -178,7 +178,7 @@ mod tests {
         });
         b.pins.push(Pin {
             component: "U1".into(), name: "1".into(), padstack: pad,
-            location: Point::new(500, 0), net: Some(3),
+            location: Point::new(500, 0), net: Some(3), rotation: 0.0, front: true,
         });
         b.traces.push(Trace {
             layer: 0, width: 20, corners: vec![Point::new(0, 0), Point::new(1000, 0)],

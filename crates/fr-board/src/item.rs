@@ -32,6 +32,11 @@ pub struct Pin {
     pub padstack: usize,
     pub location: Point,
     pub net: Option<usize>,
+    /// Component placement rotation in degrees CCW (applied to the pad shape so a
+    /// rectangular/polygon pad is drawn in its true orientation). 0 for unrotated.
+    pub rotation: f64,
+    /// Component side: true = front (top), false = back (mirrored about Y).
+    pub front: bool,
 }
 
 /// A routed trace: a polyline on one layer with a width, belonging to a net.

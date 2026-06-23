@@ -61,6 +61,17 @@ pub struct App {
     show_browser: bool,
     browser_dir: PathBuf,
     path_input: String,
+
+    // unlimited undo/redo of board mutations (snapshots of traces+vias).
+    undo_stack: Vec<BoardSnapshot>,
+    redo_stack: Vec<BoardSnapshot>,
+}
+
+/// A snapshot of the routable geometry for undo/redo (the only thing routing mutates).
+#[derive(Clone)]
+struct BoardSnapshot {
+    traces: Vec<fr_board::Trace>,
+    vias: Vec<fr_board::Via>,
 }
 
 impl Default for App {
@@ -95,6 +106,8 @@ impl Default for App {
             show_browser: false,
             browser_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             path_input: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 }
@@ -127,7 +140,50 @@ impl App {
         }
     }
 
+    /// Push the current board geometry onto the undo stack (clearing redo). Call BEFORE a
+    /// mutation. No-op if there's no board.
+    fn push_undo(&mut self) {
+        if let Some(board) = self.board.as_ref() {
+            self.undo_stack.push(BoardSnapshot {
+                traces: board.traces.clone(),
+                vias: board.vias.clone(),
+            });
+            self.redo_stack.clear();
+        }
+    }
+
+    fn undo(&mut self) {
+        let Some(board) = self.board.as_mut() else { return };
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(BoardSnapshot { traces: board.traces.clone(), vias: board.vias.clone() });
+            board.traces = prev.traces;
+            board.vias = prev.vias;
+            self.router = None;
+            self.selected = None;
+            self.last_report = None;
+            self.status = format!("Undo ({} more).", self.undo_stack.len());
+        } else {
+            self.status = "Nothing to undo.".into();
+        }
+    }
+
+    fn redo(&mut self) {
+        let Some(board) = self.board.as_mut() else { return };
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(BoardSnapshot { traces: board.traces.clone(), vias: board.vias.clone() });
+            board.traces = next.traces;
+            board.vias = next.vias;
+            self.router = None;
+            self.selected = None;
+            self.last_report = None;
+            self.status = format!("Redo ({} more).", self.redo_stack.len());
+        } else {
+            self.status = "Nothing to redo.".into();
+        }
+    }
+
     fn route(&mut self) {
+        self.push_undo();
         let Some(board) = self.board.as_mut() else { return };
         board.traces.clear();
         board.vias.clear();
@@ -164,33 +220,77 @@ impl App {
     }
 
     /// Handle a click in route mode at board point `p`: if no route is in progress, start
-    /// one at `p`; otherwise commit a segment to `p`. Both use the active layer.
+    /// one — anchored on the clicked pad/trace/via if one is under the cursor (adopting ITS
+    /// net and layer), else at the raw point on the active layer. Otherwise commit a
+    /// segment to `p`. Starting on a pad also highlights that net.
     fn route_click(&mut self, p: Point) {
         self.ensure_router();
-        let layer = self.active_layer;
-        let net = self.highlight_net.map(|n| n as u32).unwrap_or(0);
-        let Some(router) = self.router.as_mut() else { return };
-        if !router.has_start() {
-            router.begin(p, layer, net);
+        if self.router.as_ref().map(|r| !r.has_start()).unwrap_or(false) {
+            // begin: snap to a clicked item to pick the start point, net, and layer.
+            let tol = 6.0 / self.view.as_ref().map(|v| v.scale).unwrap_or(1.0).max(1e-9);
+            let (start, layer, net) = self.route_anchor(p, tol);
+            self.highlight_net = Some(net as usize);
+            if let Some(router) = self.router.as_mut() {
+                router.begin(start, layer, net);
+            }
+            self.active_layer = layer;
             self.status = format!(
-                "Manual route started on layer {layer}, net {net}. Click to place; right-click/Esc to finish."
+                "Manual route started (net {net}, layer {layer}). Click to place; right-click/Esc to finish."
             );
-        } else if let Some(board) = self.board.as_mut() {
-            if self.shove {
-                let out = router.commit_shove(board, p, layer);
-                self.last_report = None;
-                self.status = if out.committed {
-                    format!("Placed segment (shove: {} rerouted, {} dropped).", out.rerouted, out.dropped)
-                } else {
-                    "No route even with shove (try another path or layer).".into()
-                };
-            } else if router.commit(board, p, layer) {
-                self.last_report = None;
-                self.status = "Placed a manual route segment.".into();
+            return;
+        }
+        // commit a segment to the clicked point on the active layer.
+        let layer = self.active_layer;
+        self.push_undo(); // board is about to change
+        let Some(router) = self.router.as_mut() else { return };
+        let Some(board) = self.board.as_mut() else { return };
+        if self.shove {
+            let out = router.commit_shove(board, p, layer);
+            self.last_report = None;
+            self.status = if out.committed {
+                format!("Placed segment (shove: {} rerouted, {} dropped).", out.rerouted, out.dropped)
             } else {
-                self.status = "No clear route to that point (enable Shove, or try another path/layer).".into();
+                "No route even with shove (try another path or layer).".into()
+            };
+        } else if router.commit(board, p, layer) {
+            self.last_report = None;
+            self.status = "Placed a manual route segment.".into();
+        } else {
+            self.status = "No clear route to that point (enable Shove, or try another path/layer).".into();
+        }
+    }
+
+    /// Choose the start anchor for a manual route at click point `p`: if a pad/via/trace is
+    /// within `tol` board units, snap to it and adopt its net + layer; otherwise use `p` on
+    /// the active layer with net 0.
+    fn route_anchor(&self, p: Point, tol: f64) -> (Point, usize, u32) {
+        let Some(board) = self.board.as_ref() else { return (p, self.active_layer, 0) };
+        if let Some(pick) = crate::picking::pick_at(board, p, tol, &self.layer_visible) {
+            match pick {
+                crate::picking::Pick::Pad { pin_index } => {
+                    if let Some(pin) = board.pins.get(pin_index) {
+                        let layer = board
+                            .padstacks
+                            .get(pin.padstack)
+                            .and_then(|ps| ps.from_layer())
+                            .unwrap_or(self.active_layer);
+                        return (pin.location, layer, pin.net.unwrap_or(0) as u32);
+                    }
+                }
+                crate::picking::Pick::Via { index } => {
+                    if let Some(v) = board.vias.get(index) {
+                        return (v.location, self.active_layer, v.net.unwrap_or(0) as u32);
+                    }
+                }
+                crate::picking::Pick::Trace { index } => {
+                    if let Some(t) = board.traces.get(index) {
+                        let end = *t.corners.last().unwrap_or(&p);
+                        return (end, t.layer, t.net.unwrap_or(0) as u32);
+                    }
+                }
             }
         }
+        (p, self.active_layer, 0)
     }
 
     /// Finish/cancel the in-progress manual route.
@@ -202,6 +302,7 @@ impl App {
     }
 
     fn clear_routes(&mut self) {
+        self.push_undo();
         if let Some(board) = self.board.as_mut() {
             board.traces.clear();
             board.vias.clear();
@@ -226,17 +327,31 @@ impl App {
         }
     }
 
+    /// Per-layer trace color, matching the Java freerouting default scheme: layer 0 (top)
+    /// red, layer 1 blue, inner signal layers cycle through 6 greens/oranges/etc.
     fn layer_color(layer: usize) -> Color32 {
-        const PALETTE: [Color32; 6] = [
-            Color32::from_rgb(220, 60, 60),
-            Color32::from_rgb(60, 140, 220),
-            Color32::from_rgb(80, 200, 100),
-            Color32::from_rgb(220, 180, 60),
-            Color32::from_rgb(200, 100, 220),
-            Color32::from_rgb(60, 200, 200),
-        ];
-        PALETTE[layer % PALETTE.len()]
+        match layer {
+            0 => Color32::from_rgb(200, 52, 52),   // top layer: red
+            1 => Color32::from_rgb(77, 127, 196),  // second layer: blue
+            _ => {
+                // inner layers (Java: signal_layer_no % 6)
+                const INNER: [Color32; 6] = [
+                    Color32::from_rgb(40, 204, 217),  // remainder 0
+                    Color32::from_rgb(127, 200, 127), // 1
+                    Color32::from_rgb(206, 125, 44),  // 2
+                    Color32::from_rgb(79, 203, 203),  // 3
+                    Color32::from_rgb(219, 98, 139),  // 4
+                    Color32::from_rgb(167, 165, 198), // 5
+                ];
+                INNER[layer % 6]
+            }
+        }
     }
+
+    // Java freerouting default palette (boardgraphics OtherColorTableModel / ItemColorTableModel).
+    const C_BACKGROUND: Color32 = Color32::from_rgb(0, 16, 35);
+    const C_OUTLINE: Color32 = Color32::from_rgb(100, 150, 255);
+    const C_PAD: Color32 = Color32::from_rgb(227, 183, 46);     // pins/vias: gold
 
     /// Color for drawing copper on `layer`, emphasizing the active layer: the active layer
     /// (or all layers when fade is off) gets its full palette color; other layers are
@@ -265,7 +380,7 @@ impl App {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let screen = resp.rect;
         // Dark neutral backdrop, clearly distinct from the (greener) board substrate.
-        painter.rect_filled(screen, 0.0, Color32::from_rgb(12, 12, 16));
+        painter.rect_filled(screen, 0.0, Self::C_BACKGROUND);
 
         if self.view.is_none() || self.refit {
             let bounds = board
@@ -324,7 +439,10 @@ impl App {
         // egui's convex-polygon fill is winding-sensitive (it can drop reversed triangles
         // on some backends). The Mesh rasterizes regardless of vertex order.
         if board.outline.len() >= 3 {
-            let board_fill = Color32::from_rgb(22, 64, 50); // dark PCB green-teal
+            // subtle lift over the background so the board area reads, with the Java blue
+            // outline. (Java draws the board on the background; we add a faint fill for
+            // contrast against off-board.)
+            let board_fill = Color32::from_rgb(10, 30, 58);
             let mut mesh = egui::epaint::Mesh::default();
             for tri in crate::padgeom::triangulate(&board.outline) {
                 let base = mesh.vertices.len() as u32;
@@ -341,7 +459,7 @@ impl App {
             for i in 0..edge.len() {
                 painter.line_segment(
                     [edge[i], edge[(i + 1) % edge.len()]],
-                    Stroke::new(2.5, Color32::from_rgb(150, 230, 200)),
+                    Stroke::new(2.0, Self::C_OUTLINE),
                 );
             }
         }
@@ -359,7 +477,7 @@ impl App {
                     return; // two-pass: faded behind, active in front
                 }
                 let hl = self.highlight_net.is_some() && pin.net == self.highlight_net;
-                let col = if hl { Color32::from_rgb(245, 230, 130) } else { lcol };
+                let col = if hl { Self::C_PAD } else { lcol };
                 match shape {
                     crate::padgeom::PadDraw::Circle { center, radius } => {
                         let c = view_ro.to_screen(center, screen);
@@ -475,7 +593,7 @@ impl App {
         for v in &board.vias {
             let c = view_ro.to_screen(v.location, screen);
             let dim = self.highlight_net.is_some() && v.net != self.highlight_net;
-            let col = if dim { Color32::from_gray(120) } else { Color32::WHITE };
+            let col = if dim { Color32::from_gray(120) } else { Self::C_PAD };
             painter.circle_stroke(c, 3.0, Stroke::new(1.5, col));
         }
 
@@ -566,18 +684,23 @@ impl App {
             }
         }
 
-        // hover tooltip with item info (suppressed in route mode to avoid clutter)
+        // hover tooltip with item info (suppressed in route mode to avoid clutter). Give it
+        // a wide min width and disable wrapping so each info line stays on one line.
         if !self.route_mode {
             if let Some(hp) = hover_pick {
                 let text = Self::pick_info(board, hp);
                 egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("pick_tip"), |ui| {
-                    ui.label(text);
+                    ui.set_min_width(340.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.label(egui::RichText::new(text).monospace());
                 });
             }
         }
 
+        // Selecting an item highlights its whole net (all pads/vias/traces on that net).
         if let Some(sel) = new_selection {
             self.selected = sel;
+            self.highlight_net = sel.and_then(|p| pick_net(board, p));
         }
         // apply captured route-mode intents (board borrow has ended)
         if route_finish {
@@ -762,20 +885,33 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let has_board = self.board.is_some();
 
-        // Layer cycling via keyboard: [ / ] (and ← / → as aliases) step the active layer.
-        // Mouse wheel is reserved for zoom; Ctrl/Shift+wheel cycles layers (handled in the
-        // canvas). Ignore the keys while a text field has focus.
+        // Keyboard: ↑/↓ (and [ / ] as aliases) step the active layer; Ctrl+Z / Ctrl+Y
+        // (or Ctrl+Shift+Z) undo/redo. Mouse wheel is reserved for zoom; Ctrl/Shift+wheel
+        // cycles layers (handled in the canvas). Ignore while a text field has focus.
         if has_board && !ctx.wants_keyboard_input() {
-            let (mut dn, mut up) = (false, false);
+            let (mut dn, mut up, mut do_undo, mut do_redo) = (false, false, false, false);
             ctx.input(|i| {
-                dn = i.key_pressed(egui::Key::OpenBracket) || i.key_pressed(egui::Key::ArrowLeft);
-                up = i.key_pressed(egui::Key::CloseBracket) || i.key_pressed(egui::Key::ArrowRight);
+                dn = i.key_pressed(egui::Key::OpenBracket) || i.key_pressed(egui::Key::ArrowDown);
+                up = i.key_pressed(egui::Key::CloseBracket) || i.key_pressed(egui::Key::ArrowUp);
+                let ctrl = i.modifiers.ctrl || i.modifiers.command;
+                if ctrl && i.key_pressed(egui::Key::Z) {
+                    if i.modifiers.shift { do_redo = true; } else { do_undo = true; }
+                }
+                if ctrl && i.key_pressed(egui::Key::Y) {
+                    do_redo = true;
+                }
             });
             if dn {
                 self.cycle_layer(-1);
             }
             if up {
                 self.cycle_layer(1);
+            }
+            if do_undo {
+                self.undo();
+            }
+            if do_redo {
+                self.redo();
             }
         }
 
@@ -801,6 +937,13 @@ impl eframe::App for App {
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Fit")).clicked() {
                     self.refit = true;
+                }
+                ui.separator();
+                if ui.add_enabled(!self.undo_stack.is_empty(), egui::Button::new("↶ Undo")).clicked() {
+                    self.undo();
+                }
+                if ui.add_enabled(!self.redo_stack.is_empty(), egui::Button::new("↷ Redo")).clicked() {
+                    self.redo();
                 }
                 ui.separator();
                 if ui.add_enabled(has_board, egui::Button::new("Export RTE")).clicked() {
@@ -981,6 +1124,15 @@ impl eframe::App for App {
         });
 
         self.file_browser(ctx);
+    }
+}
+
+/// The net of a picked item (pad/via/trace), if any.
+fn pick_net(board: &Board, pick: crate::picking::Pick) -> Option<usize> {
+    match pick {
+        crate::picking::Pick::Pad { pin_index } => board.pins.get(pin_index).and_then(|p| p.net),
+        crate::picking::Pick::Via { index } => board.vias.get(index).and_then(|v| v.net),
+        crate::picking::Pick::Trace { index } => board.traces.get(index).and_then(|t| t.net),
     }
 }
 

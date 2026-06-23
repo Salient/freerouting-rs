@@ -260,7 +260,7 @@ mod tests {
         let mut shapes = vec![Some(PadShape::Circle { radius: 150_000 })];
         let pad = board.padstacks.add(Padstack { name: "B".into(), shapes: std::mem::take(&mut shapes), drillable: false });
         // blocker for a DIFFERENT net (net 1) sits in the middle
-        board.pins.push(Pin { component: "X".into(), name: "1".into(), padstack: pad, location: Point::new(500_000, 500_000), net: Some(1) });
+        board.pins.push(Pin { component: "X".into(), name: "1".into(), padstack: pad, location: Point::new(500_000, 500_000), net: Some(1), rotation: 0.0, front: true });
         let grid = Grid::new(IntBox::new(0, 0, 1_000_000, 1_000_000), 50_000, 1);
         let obs = ObstacleMap::build(&board, &grid);
         let start = grid.node_at(0, Point::new(100_000, 500_000));
