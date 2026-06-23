@@ -6,6 +6,10 @@ const REAL: &str = include_str!("../../fr-dsn/tests/fixtures/altium_board.dsn");
 #[test]
 fn no_routes_outside_outline() {
     let (mut board,_w)=read_board(REAL);
+    // verify the AUTOROUTER's output stays in-bounds; route from a clean slate (drop the
+    // source design's pre-existing wiring, now loaded as fixed copper).
+    board.traces.clear();
+    board.vias.clear();
     route_board(&mut board, &RouteOptions{max_time_secs:0,threads:1,seed:1,..Default::default()});
     let outline=board.outline.clone();
     let mut outside=0; let mut total=0;

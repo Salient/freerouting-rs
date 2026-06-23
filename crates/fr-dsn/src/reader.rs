@@ -6,8 +6,8 @@
 //! reader never panics on real Altium output.
 
 use fr_board::{
-    Board, Component, Direction, Layer, LayerStack, Net, PadShape, Padstack, Pin, Resolution, Rules,
-    Unit,
+    Board, Component, Direction, FixedState, Layer, LayerStack, Net, NetSet, PadShape, Padstack,
+    PadstackSet, Pin, Resolution, Rules, Trace, Unit, Via,
 };
 use fr_geometry::{ConvexTile, Point};
 
@@ -53,6 +53,12 @@ pub fn read_board(src: &str) -> (Board, Vec<String>) {
     // the old "all pins at component center" approximation and is what lets the router
     // see distinct, correctly-located endpoints.
     build_pins(&mut board, &images, &mut warnings);
+
+    // Pre-existing wiring: traces/vias already routed in the source design. Keep them as
+    // fixed copper (the autorouter routes around them and won't rip them up).
+    if let Some(wiring) = pcb.child("wiring") {
+        read_wiring(wiring, &board.layers, &board.padstacks, &board.nets, resolution, &mut board.traces, &mut board.vias, &mut warnings);
+    }
 
     // Import-correctness check: flag overlapping pads (a common Altium-vs-Specctra issue).
     check_pad_overlaps(&board, &mut warnings);
@@ -158,6 +164,66 @@ fn build_pins(
         warnings.push(format!("{missing_images} components had no matching library image"));
     }
     board.pins = pins;
+}
+
+/// Parse the `(wiring ...)` section: pre-routed wires and vias from the source design.
+/// Each `(wire (path L w x y ...) (net N) (type T))` becomes a fixed Trace; each
+/// `(via padstack x y ...)` becomes a fixed Via. Nets are resolved by name; unknown
+/// nets/layers are skipped with a count warning. These are kept as fixed copper so the
+/// autorouter routes around them and does not rip them up.
+#[allow(clippy::too_many_arguments)]
+fn read_wiring(
+    wiring: &Sexp,
+    layers: &LayerStack,
+    padstacks: &PadstackSet,
+    nets: &NetSet,
+    res: Resolution,
+    traces: &mut Vec<Trace>,
+    vias: &mut Vec<Via>,
+    warnings: &mut Vec<String>,
+) {
+    let mut skipped = 0usize;
+    for wire in wiring.children("wire") {
+        let Some(path) = wire.child("path") else { continue };
+        let a = path.atom_args();
+        let layer_tok = a.first().copied().unwrap_or("");
+        let Some(layer) = layers.index_of(layer_tok) else { skipped += 1; continue };
+        // path: <layer> <width> x y x y ...
+        let width = a.get(1).and_then(|s| parse_num(s)).map(|w| scale(w, res)).unwrap_or(0).max(1);
+        let nums: Vec<f64> = a.iter().skip(2).filter_map(|s| parse_num(s)).collect();
+        let corners: Vec<Point> = nums.chunks_exact(2).map(|c| scale_pt(c[0], c[1], res)).collect();
+        if corners.len() < 2 {
+            continue;
+        }
+        let net = wire
+            .child("net")
+            .and_then(|n| n.atom_args().first().copied())
+            .and_then(|name| nets.index_of(name));
+        traces.push(Trace { layer, width, corners, net, fixed: FixedState::Fix });
+    }
+    for via in wiring.children("via") {
+        let a = via.atom_args();
+        // (via <padstack> x y [net ...])
+        if a.len() < 3 {
+            continue;
+        }
+        let padstack = padstacks.index_of(a[0]).unwrap_or(usize::MAX);
+        let (Some(x), Some(y)) = (parse_num(a[1]), parse_num(a[2])) else { continue };
+        let net = via
+            .child("net")
+            .and_then(|n| n.atom_args().first().copied())
+            .and_then(|name| nets.index_of(name));
+        vias.push(Via { padstack, location: scale_pt(x, y, res), net, fixed: FixedState::Fix });
+    }
+    if skipped > 0 {
+        warnings.push(format!("{skipped} pre-existing wire(s) on an unknown layer were skipped"));
+    }
+    if !traces.is_empty() || !vias.is_empty() {
+        warnings.push(format!(
+            "loaded {} pre-existing wire(s) + {} via(s) from the source design (kept as fixed copper)",
+            traces.len(), vias.len()
+        ));
+    }
 }
 
 /// Import-correctness pass: detect overlapping pad geometry, a frequent Altium-export
