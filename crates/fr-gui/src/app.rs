@@ -239,25 +239,52 @@ impl App {
             );
             return;
         }
-        // commit a segment to the clicked point on the active layer.
-        let layer = self.active_layer;
+        // Commit a segment to the clicked point. Snap the target to a nearby pad/via/trace
+        // (its exact point + layer) so clicking a destination PAD actually completes the
+        // connection there, rather than missing by a few units / committing on the wrong
+        // layer. A target on the same net that's an endpoint finishes the connection.
+        let tol = 6.0 / self.view.as_ref().map(|v| v.scale).unwrap_or(1.0).max(1e-9);
+        let (target, target_layer, _tnet) = self.route_anchor(p, tol);
         self.push_undo(); // board is about to change
         let Some(router) = self.router.as_mut() else { return };
         let Some(board) = self.board.as_mut() else { return };
-        if self.shove {
-            let out = router.commit_shove(board, p, layer);
+        let committed = if self.shove {
+            let out = router.commit_shove(board, target, target_layer);
             self.last_report = None;
-            self.status = if out.committed {
-                format!("Placed segment (shove: {} rerouted, {} dropped).", out.rerouted, out.dropped)
+            if out.committed {
+                self.status = format!("Placed segment (shove: {} rerouted, {} dropped).", out.rerouted, out.dropped);
             } else {
-                "No route even with shove (try another path or layer).".into()
-            };
-        } else if router.commit(board, p, layer) {
+                self.status = "No route even with shove (try another path or layer).".into();
+            }
+            out.committed
+        } else if router.commit(board, target, target_layer) {
             self.last_report = None;
             self.status = "Placed a manual route segment.".into();
+            true
         } else {
             self.status = "No clear route to that point (enable Shove, or try another path/layer).".into();
+            false
+        };
+        // if we committed onto a pad of this net, the connection is done — finish the route
+        // so the next click can start a new one. The router anchor advances to `target`.
+        if committed {
+            self.active_layer = target_layer;
+            if self.snapped_to_pad(target, tol) {
+                if let Some(r) = self.router.as_mut() {
+                    r.cancel();
+                }
+                self.status = "Connected to pad — route complete.".into();
+            }
         }
+    }
+
+    /// True if `p` is within `tol` of a pad center (used to decide a route reached a pad).
+    fn snapped_to_pad(&self, p: Point, tol: f64) -> bool {
+        let Some(board) = self.board.as_ref() else { return false };
+        matches!(
+            crate::picking::pick_at(board, p, tol, &self.layer_visible),
+            Some(crate::picking::Pick::Pad { .. })
+        )
     }
 
     /// Choose the start anchor for a manual route at click point `p`: if a pad/via/trace is
@@ -429,7 +456,10 @@ impl App {
         } else {
             None
         };
-        let route_finish = self.route_mode && (resp.secondary_clicked() || esc);
+        // Right-click cancels the in-progress route (stays in route mode); Esc exits route
+        // mode entirely.
+        let route_cancel = self.route_mode && resp.secondary_clicked();
+        let route_exit = self.route_mode && esc;
         let new_selection: Option<Option<crate::picking::Pick>> =
             if resp.clicked() && !self.route_mode { Some(hover_pick) } else { None };
 
@@ -703,7 +733,11 @@ impl App {
             self.highlight_net = sel.and_then(|p| pick_net(board, p));
         }
         // apply captured route-mode intents (board borrow has ended)
-        if route_finish {
+        if route_exit {
+            self.route_finish();
+            self.route_mode = false;
+            self.status = "Exited manual route mode.".into();
+        } else if route_cancel {
             self.route_finish();
         } else if let Some(p) = route_click_at {
             self.route_click(p);
@@ -931,6 +965,18 @@ impl eframe::App for App {
                 ui.separator();
                 if ui.add_enabled(has_board, egui::Button::new("▶ Route")).clicked() {
                     self.route();
+                }
+                // Manual-route mode toggle (primary action). Highlighted when active.
+                let route_btn = egui::Button::new("✏ Manual")
+                    .selected(self.route_mode);
+                if ui.add_enabled(has_board, route_btn).clicked() {
+                    self.route_mode = !self.route_mode;
+                    if self.route_mode {
+                        self.ensure_router();
+                        self.status = "Manual route mode: click a pad to start, click to place, Esc to exit.".into();
+                    } else {
+                        self.route_finish();
+                    }
                 }
                 if ui.add_enabled(has_board, egui::Button::new("Clear")).clicked() {
                     self.clear_routes();
