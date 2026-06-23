@@ -239,11 +239,27 @@ fn pad_shape_extent(shape: Option<&PadShape>) -> Option<i64> {
     }
 }
 
+/// True if a through via of radius `r` at `center` for `net` clears all different-net
+/// copper by `clearance` on every layer it spans. Uses a zero-length segment query (the
+/// via disc) per layer against the exact index.
+fn via_is_clear(
+    index: &ObstacleIndex,
+    layers: usize,
+    center: Point,
+    r: i64,
+    net: u32,
+    clearance: i64,
+) -> bool {
+    (0..layers).all(|l| index.segment_is_clear(l, center, center, r, net, clearance))
+}
+
 /// Vias needed to join a net's independently-routed connections where their trace
 /// endpoints coincide in (x,y) but on different layers. For each such junction point we
-/// emit ONE through via. Endpoints are trace first/last corners (where MST edges meet at
-/// pins or each other). Returns the vias to add for `net`.
+/// emit ONE through via — EXCEPT where a same-net pad already spans those layers (a
+/// through-hole pad connects its layers itself, so no via is needed). Endpoints are trace
+/// first/last corners (where MST edges meet at pins or each other).
 fn junction_vias_for(
+    board: &Board,
     produced: &[fr_route::RoutedConnection],
     via_padstack: usize,
     net: usize,
@@ -261,14 +277,36 @@ fn junction_vias_for(
     }
     let mut vias = Vec::new();
     for ((x, y), layers) in by_point {
-        if layers.len() >= 2 {
-            vias.push(fr_board::Via {
-                padstack: via_padstack,
-                location: Point::new(x, y),
-                net: Some(net),
-                fixed: fr_board::FixedState::Route,
-            });
+        if layers.len() < 2 {
+            continue;
         }
+        // If a same-net pad at this point already spans the full range of meeting layers,
+        // it connects them itself — no via needed (avoids redundant vias at through-hole
+        // pads that were being clearance-dropped and killing completion).
+        let pt = Point::new(x, y);
+        let (lo, hi) = (*layers.iter().next().unwrap(), *layers.iter().next_back().unwrap());
+        let pad_spans = board.pins.iter().any(|pin| {
+            pin.location == pt
+                && pin.net == Some(net)
+                && board
+                    .padstacks
+                    .get(pin.padstack)
+                    .map(|ps| {
+                        !ps.is_empty()
+                            && ps.from_layer().unwrap_or(99) <= lo
+                            && ps.to_layer().unwrap_or(0) >= hi
+                    })
+                    .unwrap_or(false)
+        });
+        if pad_spans {
+            continue;
+        }
+        vias.push(fr_board::Via {
+            padstack: via_padstack,
+            location: pt,
+            net: Some(net),
+            fixed: fr_board::FixedState::Route,
+        });
     }
     vias
 }
@@ -405,7 +443,19 @@ fn route_incremental(
                 // electrically broken there with no via. Find every point where this net's
                 // trace endpoints land on >1 layer and add a connecting via, so multi-layer
                 // nets are actually joined.
-                let junction_vias = junction_vias_for(&produced, ctx.via_padstack, net_id);
+                let junction_vias = junction_vias_for(board, &produced, ctx.via_padstack, net_id);
+                // Every needed junction via must CLEAR different-net copper on every layer it
+                // spans (a via is a through disc), so vias never collide with adjacent
+                // different-net pads. A via at the net's own pin clears trivially. If any
+                // required layer-join via can't be placed clear, drop the whole net (it
+                // can't be connected there cleanly) and retry — the drop-partial policy.
+                let junction_ok = junction_vias.iter().all(|v| {
+                    via_is_clear(&index, ctx.grid.layers, v.location, via_exact_r, net_id as u32, ctx.clearance)
+                });
+                if !junction_ok {
+                    still_incomplete += 1;
+                    continue;
+                }
                 for c in &produced {
                     for t in &c.traces {
                         obs.stamp_trace(t.layer, &t.corners, t.width, net_id as u32);
@@ -540,6 +590,7 @@ pub fn net_ratsnest(board: &Board, net_id: usize) -> Vec<(Point, Point)> {
     let pts = net_pin_points(board, net_id);
     mst_edges(&pts).into_iter().map(|(a, b)| (pts[a], pts[b])).collect()
 }
+
 
 pub fn net_pin_points(board: &Board, net_id: usize) -> Vec<Point> {
     let mut pts: Vec<Point> = board.pins_of_net(net_id).map(|p| p.location).collect();

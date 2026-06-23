@@ -30,10 +30,45 @@ pub fn route_connection(
     max_expansions: usize,
     validator: Option<&EdgeValidator>,
 ) -> Option<RoutedConnection> {
-    // start/goal nodes on every layer (the connection may begin/end on any layer the
-    // pad reaches; for the grid model we allow all layers and let A* pick).
-    let starts: Vec<Node> = (0..grid.layers).map(|l| grid.node_at(l, start_pt)).collect();
-    let goals: Vec<Node> = (0..grid.layers).map(|l| grid.node_at(l, goal_pt)).collect();
+    route_connection_on_layers(
+        board, grid, obs, net, start_pt, goal_pt, width, via_padstack, costs, max_expansions,
+        validator, None, None,
+    )
+}
+
+/// Like `route_connection`, but optionally restricts the start/goal to specific layers
+/// (the pad's actual copper layers). Restricting prevents a connection from "reaching" a
+/// pin on a layer where the pad has no copper — which previously forced spurious junction
+/// vias (and via-pad collisions) when two edges met a pad on different wrong layers. When
+/// a layer list is None, all layers are allowed (free choice, as before).
+#[allow(clippy::too_many_arguments)]
+pub fn route_connection_on_layers(
+    board: &Board,
+    grid: &Grid,
+    obs: &ObstacleMap,
+    net: u32,
+    start_pt: Point,
+    goal_pt: Point,
+    width: i64,
+    via_padstack: Option<usize>,
+    costs: &Costs,
+    max_expansions: usize,
+    validator: Option<&EdgeValidator>,
+    start_layers: Option<&[usize]>,
+    goal_layers: Option<&[usize]>,
+) -> Option<RoutedConnection> {
+    let layers_of = |restrict: Option<&[usize]>, pt: Point| -> Vec<Node> {
+        match restrict {
+            Some(ls) if !ls.is_empty() => ls
+                .iter()
+                .filter(|&&l| l < grid.layers)
+                .map(|&l| grid.node_at(l, pt))
+                .collect(),
+            _ => (0..grid.layers).map(|l| grid.node_at(l, pt)).collect(),
+        }
+    };
+    let starts = layers_of(start_layers, start_pt);
+    let goals = layers_of(goal_layers, goal_pt);
 
     let path = search(grid, obs, net, &starts, &goals, costs, max_expansions, validator)?;
     Some(path_to_geometry(board, grid, net, &path, width, via_padstack))
