@@ -6,6 +6,7 @@
 //! layer visibility + a color legend, net highlight, and an incompletes readout.
 
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Sense, Stroke};
@@ -86,6 +87,16 @@ pub struct App {
     // unlimited undo/redo of board mutations (snapshots of traces+vias).
     undo_stack: Vec<BoardSnapshot>,
     redo_stack: Vec<BoardSnapshot>,
+
+    // background autoroute: a worker thread routes a board clone and sends the result back
+    // so the UI stays responsive (no freeze). None when idle.
+    routing: Option<Receiver<RouteOutcome>>,
+}
+
+/// Result of a background autoroute: the fully-routed board + its report.
+struct RouteOutcome {
+    board: Board,
+    report: RouteReport,
 }
 
 /// A snapshot of the routable geometry for undo/redo (the only thing routing mutates).
@@ -143,6 +154,7 @@ impl Default for App {
             path_input: String::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            routing: None,
         }
     }
 }
@@ -217,9 +229,15 @@ impl App {
         }
     }
 
+    /// Start a background autoroute: clone the board (keeping fixed copper, dropping prior
+    /// autoroute) and route it on a worker thread, so the UI thread stays responsive. The
+    /// result is polled each frame in `poll_routing`.
     fn route(&mut self) {
+        if self.routing.is_some() {
+            return; // already routing
+        }
+        let Some(mut board) = self.board.clone() else { return };
         self.push_undo();
-        let Some(board) = self.board.as_mut() else { return };
         // Keep FIXED copper (pre-existing wiring + locked routes); only drop previously
         // AUTOROUTED traces/vias so re-routing fills in unrouted nets rather than wiping
         // good existing routing. route_board then skips nets that already have copper.
@@ -234,15 +252,45 @@ impl App {
             clearance: (self.opt_clearance_mil * per_unit) as i64,
             max_layers: self.opt_max_layers,
         };
-        let report = route_board(board, &opts);
-        self.selected = None; // trace/via indices changed
-        self.router = None; // board geometry changed; rebuild router lazily
-        self.status = format!(
-            "Routed {}/{} nets, {} traces, {} vias ({} incomplete)",
-            report.nets_completed, report.nets_total,
-            board.traces.len(), board.vias.len(), report.unrouted_nets.len()
-        );
-        self.last_report = Some(report);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let report = route_board(&mut board, &opts);
+            let _ = tx.send(RouteOutcome { board, report });
+        });
+        self.routing = Some(rx);
+        self.selected = None;
+        self.router = None;
+        self.status = "Autorouting… (UI stays responsive; result applies when done)".into();
+    }
+
+    /// Poll the background autoroute; when it finishes, swap in the routed board. Called
+    /// each frame. Returns true while still routing (so the UI keeps repainting).
+    fn poll_routing(&mut self) -> bool {
+        // take the receiver out so we can mutate self.board; restore it if still working.
+        let Some(rx) = self.routing.take() else { return false };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                let report = outcome.report;
+                let (traces, vias) = (outcome.board.traces.len(), outcome.board.vias.len());
+                self.board = Some(outcome.board);
+                self.router = None;
+                self.status = format!(
+                    "Routed {}/{} nets, {} traces, {} vias ({} incomplete)",
+                    report.nets_completed, report.nets_total, traces, vias,
+                    report.unrouted_nets.len()
+                );
+                self.last_report = Some(report);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.routing = Some(rx); // still working — put it back
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.status = "Autoroute thread ended unexpectedly.".into();
+                false
+            }
+        }
     }
 
     /// Recompute the cached DRC violation list from the current board.
@@ -1292,6 +1340,13 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll the background autoroute; keep repainting while it runs so the UI animates
+        // and the result applies the moment it's ready (no freeze).
+        let routing_busy = self.poll_routing();
+        if routing_busy {
+            ctx.request_repaint();
+        }
+
         let has_board = self.board.is_some();
 
         // Keyboard: ↑/↓ (and [ / ] as aliases) step the active layer; Ctrl+Z / Ctrl+Y
@@ -1338,7 +1393,12 @@ impl eframe::App for App {
                     if !p.is_empty() { self.load_path(PathBuf::from(p)); }
                 }
                 ui.separator();
-                if ui.add_enabled(has_board, egui::Button::new("▶ Route")).clicked() {
+                // Route button shows a spinner + is disabled while a background route runs.
+                let routing = self.routing.is_some();
+                if routing {
+                    ui.add(egui::Spinner::new());
+                    ui.label("routing…");
+                } else if ui.add_enabled(has_board, egui::Button::new("▶ Route")).clicked() {
                     self.route();
                 }
                 // Manual-route mode toggle (primary action). Highlighted when active.
