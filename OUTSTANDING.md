@@ -6,15 +6,11 @@ panics exist in the code; the items below are missing features / approximations.
 
 ## Correctness gaps (router can produce wrong output)
 
-1. **Keepouts ignored.** The DSN reader does not parse `(keepout ...)` (175 + 2 on the
-   real board) — routing-forbidden regions. The router can route through them. No keepout
-   field exists on the board model. → add Keepout to fr-board, parse in reader, stamp into
-   ObstacleMap + ObstacleIndex (as NO_NET obstacles). HIGH impact.
+1. ~~**Keepouts ignored.**~~ FIXED (commit f3e7260): 84 keepouts parsed + enforced in both
+   the grid ObstacleMap and the exact ObstacleIndex.
 
-2. **Pre-existing `wiring` discarded.** The DSN `(wiring ...)` has 5870 pre-routed wires +
-   vias (fixed/protected copper). The reader ignores the whole section, so we re-route
-   from scratch and don't route around existing copper. → parse wiring into fixed
-   traces/vias; treat as obstacles; don't rip them up. HIGH impact for real boards.
+2. ~~**Pre-existing `wiring` discarded.**~~ FIXED (commit 467d745): 5862 wires + 308 vias
+   loaded as fixed copper; displayed + treated as obstacles.
 
 3. **`(plane ...)` / power-plane layers ignored.** Copper-pour planes (net-tied) aren't
    parsed; traces could overlap a plane of another net. MEDIUM (board has planes via the
@@ -27,8 +23,11 @@ panics exist in the code; the items below are missing features / approximations.
    the default batch router (rip-up-reroute over all nets) is the biggest quality lever
    (completion >76%, any-angle). (STATUS, ROOMDOOR_DESIGN, ACCEPTANCE all note this.)
 
-5. **Class/rule per-net widths & clearances ignored.** The DSN `(class ...)` (8) and net
-   rules set per-net width/clearance; we use one global default_width/clearance. MEDIUM.
+5. ~~**Class/rule per-net widths & clearances ignored.**~~ N/A for this board: its 8
+   `(class)` scopes are net GROUPINGS with NO per-class `(rule (width)(clearance))`; the
+   single global `(rule width 10 clearance 8)` is parsed + applied correctly. A future
+   board with per-class rules would need per-net width plumbing through the router; not
+   built (no current test case).
 
 6. **Polygon pad clearance halo is approximate** in the GUI (draws the pad outline, not a
    true offset polygon). Circles/traces are exact. LOW (cosmetic).
