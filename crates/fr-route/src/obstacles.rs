@@ -106,30 +106,39 @@ impl<'a> ObstacleMap<'a> {
     }
 
     /// Mark all cells outside the board outline (with edge clearance) as permanently
-    /// blocked (NO_OWNER, so no net can use them).
+    /// blocked (NO_OWNER, so no net can use them). The outline is layer-independent, so we
+    /// compute the off-board cell list ONCE (one polygon scan instead of one per layer)
+    /// and apply it to every layer. We MERGE (not overwrite) so the pin/trace/via stamps
+    /// already written to inner layers are preserved.
     fn block_outside_outline(&mut self, board: &Board) {
         if board.outline.len() < 3 {
             return; // no usable outline; leave the grid open
         }
-        // shrink the inside test by edge clearance: a cell must be at least `edge` inside
         let edge = board.rules.edge_clearance;
-        for layer in 0..self.grid.layers {
-            for col in 0..self.grid.cols as i32 {
-                for row in 0..self.grid.rows as i32 {
-                    let n = Node { layer: layer as u32, col, row };
-                    let p = self.grid.point_of(n);
-                    if !inside_with_margin(&board.outline, p, edge) {
-                        let i = self.idx(n);
-                        self.blocked[layer][i] = true;
-                        self.owner[layer][i] = NO_OWNER;
-                    }
+        // collect off-board cell indices once (layer-independent).
+        let mut off_board: Vec<usize> = Vec::new();
+        for col in 0..self.grid.cols as i32 {
+            for row in 0..self.grid.rows as i32 {
+                let n = Node { layer: 0, col, row };
+                let p = self.grid.point_of(n);
+                if !inside_with_margin(&board.outline, p, edge) {
+                    off_board.push(self.idx(n));
                 }
+            }
+        }
+        // apply the off-board mask to every layer (merge: set blocked + NO_OWNER).
+        for layer in 0..self.grid.layers {
+            for &i in &off_board {
+                self.blocked[layer][i] = true;
+                self.owner[layer][i] = NO_OWNER;
             }
         }
     }
 
     /// Block every grid cell whose center is inside `polygon` (with `clearance` margin) on
     /// `layer` (or all layers if None), owned by nobody — a keepout. Routing cannot enter.
+    /// Only the polygon's bounding-box cell range is scanned (not the whole grid), so many
+    /// small keepouts stay cheap.
     pub fn block_polygon(&mut self, polygon: &[Point], layer: Option<usize>, clearance: i64) {
         if polygon.len() < 3 {
             return;
@@ -138,18 +147,20 @@ impl<'a> ObstacleMap<'a> {
             Some(b) => b.offset(clearance.max(0)),
             None => return,
         };
+        // restrict iteration to the bbox's grid-cell range.
+        let lo = self.grid.node_at(0, bb.ll);
+        let hi = self.grid.node_at(0, bb.ur);
+        let (c0, c1) = (lo.col.min(hi.col), lo.col.max(hi.col));
+        let (r0, r1) = (lo.row.min(hi.row), lo.row.max(hi.row));
         let layers: Vec<usize> = match layer {
             Some(l) if l < self.grid.layers => vec![l],
             _ => (0..self.grid.layers).collect(),
         };
         for &layer in &layers {
-            for col in 0..self.grid.cols as i32 {
-                for row in 0..self.grid.rows as i32 {
+            for col in c0..=c1 {
+                for row in r0..=r1 {
                     let n = Node { layer: layer as u32, col, row };
                     let p = self.grid.point_of(n);
-                    if !bb.contains(p) {
-                        continue;
-                    }
                     if polygon_contains(polygon, p) {
                         let i = self.idx(n);
                         self.blocked[layer][i] = true;

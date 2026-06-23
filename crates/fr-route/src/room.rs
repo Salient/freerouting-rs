@@ -174,7 +174,10 @@ pub fn complete_rooms(
         seed_pt.x - s, seed_pt.y - s, seed_pt.x + s, seed_pt.y + s,
     ));
 
-    // Gather nearby obstacle tiles (inflated copper). Query a box covering the bound.
+    // Gather nearby obstacle tiles (inflated copper). Query a box covering the bound. (A
+    // smaller local cap was tried for speed but can exclude an obstacle that should bound
+    // the room — keep the full bound for correctness; the bound is already the windowed
+    // neighbourhood from MazeParams::room_bound for the maze caller.)
     let reach = (bound.width().max(bound.height())).max(1);
     let qbox = IntBox::new(
         seed_pt.x - reach, seed_pt.y - reach, seed_pt.x + reach, seed_pt.y + reach,

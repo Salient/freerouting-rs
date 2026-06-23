@@ -112,13 +112,17 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(&input)?;
     let (mut board, warnings) = fr_dsn::read_board(&src);
     eprintln!(
-        "loaded {}: {} layers, {} nets, {} components ({} warnings)",
+        "loaded {}: {} layers, {} nets, {} components, {} pre-existing wires ({} warnings)",
         board.name,
         board.layer_count(),
         board.nets.len(),
         board.components.len(),
+        board.traces.len(),
         warnings.len()
     );
+    // autoroute from a clean slate (drop the source design's pre-existing wiring).
+    board.traces.clear();
+    board.vias.clear();
 
     let opts = fr_engine::RouteOptions {
         max_time_secs: cli.max_time,
@@ -161,6 +165,9 @@ fn run_render(cli: &Cli, out: &PathBuf) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--render needs an input DSN path"))?;
     let src = std::fs::read_to_string(&input)?;
     let (mut board, _w) = fr_dsn::read_board(&src);
+    // autoroute from a clean slate (drop pre-existing wiring) so the render shows OUR route.
+    board.traces.clear();
+    board.vias.clear();
     let _ = fr_engine::route_board(&mut board, &fr_engine::RouteOptions::default());
     let img = render::render_board(&board, cli.width, cli.height);
     std::fs::write(out, img.to_ppm())?;

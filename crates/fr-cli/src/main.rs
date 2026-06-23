@@ -93,13 +93,18 @@ fn run_route(
     let src = fs::read_to_string(input)?;
     let (mut board, warnings) = fr_dsn::read_board(&src);
     eprintln!(
-        "loaded {}: {} layers, {} nets, {} components ({} warnings)",
+        "loaded {}: {} layers, {} nets, {} components, {} pre-existing wires ({} warnings)",
         board.name,
         board.layer_count(),
         board.nets.len(),
         board.components.len(),
+        board.traces.len(),
         warnings.len()
     );
+    // Autoroute from a clean slate: drop the source design's pre-existing wiring (loaded
+    // by the reader) so we route the whole board, not on top of existing copper.
+    board.traces.clear();
+    board.vias.clear();
 
     let opts = fr_engine::RouteOptions {
         max_time_secs: max_time, threads, seed,
